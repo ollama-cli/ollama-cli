@@ -92,21 +92,26 @@ You can call multiple tools in one response. Be precise and helpful."""
         try:
             if cmd == '/help':
                 help_text = """
-[bold cyan]Ollama CLI Help[/bold cyan]
+[bold cyan]Ollama CLI v3.0 Help[/bold cyan]
 
 [bold]General Commands:[/bold]
   /help           - Show this help message
   /quit           - Exit the CLI
   /clear          - Clear conversation history
 
-[bold]Model Commands:[/bold]
+[bold]Model & Sessions:[/bold]
   /models         - List available models
   /model <name>   - Switch current model
-
-[bold]Session Commands:[/bold]
   /sessions       - List saved sessions
   /save [name]    - Save current session
   /load <name>    - Load a saved session
+
+[bold]Core Agent Tools:[/bold]
+  [blue]Filesystem:[/blue] read_file, write_file, list_directory, grep_search, get_tree
+  [blue]Code & Python:[/blue] run_python, replace_text, code_analyze_file, run_linter
+  [blue]Web:[/blue] web_search, read_url
+  [blue]Media:[/blue] generate_image, speak_text
+  [blue]Knowledge:[/blue] kb_add, kb_search, remember_fact, recall_facts, clear_memory
 
 [bold]Integrations:[/bold]
   /mcp connect <name> <cmd> [args] - Connect MCP server
@@ -114,8 +119,8 @@ You can call multiple tools in one response. Be precise and helpful."""
   /notify setup <topic>            - Setup ntfy.sh remote control
 
 [bold]Configuration:[/bold]
-  /config ollama <url> - Set Ollama server URL
-  /config comfy <url>  - Set ComfyUI server URL
+  /config ollama <url> - Set Ollama server URL (default: http://localhost:11434)
+  /config comfy <url>  - Set ComfyUI server URL (default: http://127.0.0.1:8188)
 """
                 console.print(help_text)
             elif cmd == '/config':
