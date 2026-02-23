@@ -28,11 +28,9 @@ def run_python(code: str, args: str = "") -> str:
             os.remove(temp_file)
             
         if result.returncode == 0:
-            return f"Success:
-{output}" if output else "Success (no output)"
+            return f"Success:\n{output}" if output else "Success (no output)"
         else:
-            return f"Error (Exit {result.returncode}):
-{output}"
+            return f"Error (Exit {result.returncode}):\n{output}"
             
     except Exception as e:
         return f"Execution Error: {str(e)}"
