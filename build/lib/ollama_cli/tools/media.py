@@ -14,56 +14,6 @@ from ..core.config import load_config
         "prompt": {"type": "string", "description": "The image description"}
     }
 )
-@tool(
-    name="get_comfy_status",
-    description="Check the status of image generation jobs or the ComfyUI queue",
-    parameters={
-        "prompt_id": {"type": "string", "description": "Optional: Specific prompt ID to check", "default": ""}
-    }
-)
-def get_comfy_status(prompt_id: str = "") -> str:
-    """Queries the ComfyUI API for queue or history status"""
-    config = load_config()
-    comfy_url = config.get("comfy_url", "http://127.0.0.1:8188").rstrip("/")
-    
-    try:
-        if prompt_id:
-            # Check history for specific prompt
-            resp = requests.get(f"{comfy_url}/history/{prompt_id}", timeout=5)
-            if resp.status_code == 200:
-                history = resp.json()
-                if prompt_id in history:
-                    return f"Status for {prompt_id}: Completed. Result saved."
-            
-            # Check queue if not in history
-            resp = requests.get(f"{comfy_url}/queue", timeout=5)
-            if resp.status_code == 200:
-                queue_data = resp.json()
-                for job in queue_data.get("queue_running", []):
-                    if job[1] == prompt_id: return f"Status for {prompt_id}: Currently Running."
-                for job in queue_data.get("queue_pending", []):
-                    if job[1] == prompt_id: return f"Status for {prompt_id}: Pending in Queue."
-            
-            return f"Status for {prompt_id}: ID not found in current queue or history."
-        else:
-            # General queue status
-            resp = requests.get(f"{comfy_url}/queue", timeout=5)
-            if resp.status_code == 200:
-                queue_data = resp.json()
-                running = len(queue_data.get("queue_running", []))
-                pending = len(queue_data.get("queue_pending", []))
-                return f"ComfyUI Queue Status: {running} running, {pending} pending."
-            return f"Error: Could not retrieve queue from {comfy_url}"
-    except Exception as e:
-        return f"Error connecting to ComfyUI: {str(e)}"
-
-@tool(
-    name="generate_image",
-    description="Generate an image using the local Stable Diffusion workflow (ComfyUI)",
-    parameters={
-        "prompt": {"type": "string", "description": "The image description"}
-    }
-)
 def generate_image(prompt: str) -> str:
     """Invokes the ComfyUI API directly with a predefined workflow"""
     config = load_config()
@@ -135,44 +85,7 @@ def generate_image(prompt: str) -> str:
         if response.status_code == 200:
             data = response.json()
             prompt_id = data.get('prompt_id', 'unknown')
-            
-            # Start monitoring for the new image
-            output_path = os.path.expanduser(config.get("comfy_output_path", "~/ComfyUI/output"))
-            
-            # Helper to find the newest file with our prefix
-            def find_newest_image():
-                import glob
-                files = glob.glob(os.path.join(output_path, "ollama_cli_*"))
-                if not files: return None
-                return max(files, key=os.path.getctime)
-
-            initial_newest = find_newest_image()
-            
-            # Polling loop (max 60 seconds)
-            import time
-            found_file = None
-            for _ in range(30):
-                # Check status via API
-                status_check = get_comfy_status(prompt_id)
-                if "Completed" in status_check:
-                    # Give filesystem a moment to sync
-                    time.sleep(1)
-                    current_newest = find_newest_image()
-                    if current_newest and current_newest != initial_newest:
-                        found_file = current_newest
-                        break
-                
-                time.sleep(2)
-            
-            if found_file:
-                # Open the image automatically
-                if sys.platform == "darwin":
-                    subprocess.run(["open", found_file])
-                else:
-                    subprocess.run(["xdg-open", found_file])
-                return f"Image generation complete!\nSaved to: {found_file}\nOpening image now..."
-            
-            return f"Image generation queued successfully on {comfy_url}.\nPrompt ID: {prompt_id}\nMonitoring timed out, but the image should appear in {output_path} soon."
+            return f"Image generation queued successfully on {comfy_url}.\nPrompt ID: {prompt_id}\nCheck your ComfyUI output folder for 'ollama_cli_' prefixed files."
         else:
             return f"Error form ComfyUI: {response.status_code} - {response.text}"
             

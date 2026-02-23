@@ -18,8 +18,6 @@ DEFAULT_CONFIG = {
     "mcp_servers": {},
     "ollama_url": "http://localhost:11434",
     "comfy_url": "http://localhost:9000",
-    "comfy_output_path": "~/ComfyUI/output",
-    "image_model": "dreamshaper_8_pruned.safetensors",
     "piper": {
         "path": "~/.ollama-cli/piper/piper",
         "model": "~/.ollama-cli/piper/voice.onnx"

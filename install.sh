@@ -82,17 +82,50 @@ if [[ $REPLY =~ ^[Yy]$ ]]; then
 
     # 5. Download Image Generation Model
     echo ""
-    echo "[*] Downloading Image Generation Model (DreamShaper 8)..."
+    echo "-------------------------------------------"
+    echo "Select Image Generation Model:"
+    echo "1) DreamShaper 8 (Good quality, fast, ~2GB)"
+    echo "2) Juggernaut XL (Photo-realistic, high detail, ~6GB)"
+    read -p "Choose option (1 or 2): " MODEL_CHOICE
+    echo ""
+
     MODEL_DIR="$INSTALL_DIR/models/checkpoints"
     mkdir -p "$MODEL_DIR"
-    MODEL_PATH="$MODEL_DIR/dreamshaper_8_pruned.safetensors"
+
+    if [[ "$MODEL_CHOICE" == "2" ]]; then
+        MODEL_NAME="juggernaut_xl.safetensors"
+        MODEL_URL="https://huggingface.co/RunDiffusion/Juggernaut-XL-v9/resolve/main/Juggernaut-XL_v9_RunDiffusionPhoto_v2.safetensors"
+        echo "[*] Downloading Juggernaut XL..."
+    else
+        MODEL_NAME="dreamshaper_8_pruned.safetensors"
+        MODEL_URL="https://huggingface.co/Lykon/DreamShaper/resolve/main/DreamShaper_8_pruned.safetensors"
+        echo "[*] Downloading DreamShaper 8..."
+    fi
+
+    MODEL_PATH="$MODEL_DIR/$MODEL_NAME"
     if [ ! -f "$MODEL_PATH" ]; then
-        echo "    This may take a few minutes (approx. 2GB)..."
-        curl -L "https://huggingface.co/Lykon/DreamShaper/resolve/main/DreamShaper_8_pruned.safetensors" -o "$MODEL_PATH"
+        echo "    This may take a few minutes..."
+        curl -L "$MODEL_URL" -o "$MODEL_PATH"
         echo "✅ Model downloaded."
     else
         echo "✅ Model already exists."
     fi
+
+    # Update config with the chosen model name
+    python3 -c "
+import json
+import os
+config_path = os.path.expanduser('~/.ollama-cli-config.json')
+if os.path.exists(config_path):
+    with open(config_path, 'r') as f:
+        config = json.load(f)
+else:
+    config = {}
+config['image_model'] = '$MODEL_NAME'
+config['comfy_output_path'] = os.path.expanduser('$INSTALL_DIR/output')
+with open(config_path, 'w') as f:
+    json.dump(config, f, indent=2)
+"
 
     echo ""
     echo "[!] To use Image Generation, you must start ComfyUI:"

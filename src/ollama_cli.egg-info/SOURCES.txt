@@ -20,9 +20,12 @@ src/ollama_cli/integrations/notify.py
 src/ollama_cli/tools/__init__.py
 src/ollama_cli/tools/base.py
 src/ollama_cli/tools/code.py
+src/ollama_cli/tools/execution.py
 src/ollama_cli/tools/filesystem.py
 src/ollama_cli/tools/git.py
 src/ollama_cli/tools/knowledge.py
+src/ollama_cli/tools/media.py
+src/ollama_cli/tools/memory.py
 src/ollama_cli/tools/system.py
 src/ollama_cli/tools/web.py
 src/ollama_cli/ui/__init__.py
