@@ -89,23 +89,33 @@ def generate_image(prompt: str) -> str:
 
 @tool(
     name="speak_text",
-    description="Convert text to speech using Piper TTS",
+    description="Convert text to speech using Piper TTS (high quality)",
     parameters={
         "text": {"type": "string", "description": "Text to speak"},
         "output_file": {"type": "string", "description": "Output filename", "default": "output.wav"}
     }
 )
 def speak_text(text: str, output_file: str = "output.wav") -> str:
-    """Uses local Piper installation if available"""
-    piper_bin = os.path.expanduser("~/piper/piper")
-    model_path = os.path.expanduser("~/piper/models/en_US-lessac-medium.onnx") # Guessing model path based on common setup
+    """Uses the high-quality Piper TTS installed by the installer"""
+    piper_dir = os.path.expanduser("~/.ollama-cli/piper")
+    piper_bin = os.path.join(piper_dir, "piper")
+    model_path = os.path.join(piper_dir, "voice.onnx")
     
-    # Fallback to simple 'say' command on macOS if piper is tricky to locate without scanning
+    if os.path.exists(piper_bin) and os.path.exists(model_path):
+        try:
+            # Piper reads from stdin and writes to file
+            cmd = f'echo "{text}" | {piper_bin} --model {model_path} --output_file {output_file}'
+            subprocess.run(cmd, shell=True, check=True, capture_output=True)
+            return f"Audio saved to {output_file} (using high-quality Piper TTS)"
+        except Exception as e:
+            return f"Error using Piper: {e}. Falling back to system TTS..."
+    
+    # Fallback to simple 'say' command on macOS
     if sys.platform == "darwin":
         try:
             subprocess.run(["say", "-o", output_file, text], check=True)
-            return f"Audio saved to {output_file} (using macOS 'say')"
+            return f"Audio saved to {output_file} (using system 'say' fallback)"
         except Exception as e:
             return f"Error using 'say': {e}"
             
-    return "TTS not configured for this platform yet."
+    return "TTS engine not found. Please run the installer to set up Piper."

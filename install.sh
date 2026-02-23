@@ -100,7 +100,6 @@ if [[ $REPLY =~ ^[Yy]$ ]]; then
     fi
     
     # Update config to point to ComfyUI
-    # We use a python one-liner to update the json config safely
     python3 -c "
 import json
 import os
@@ -113,10 +112,47 @@ else:
 config['comfy_url'] = 'http://127.0.0.1:8188'
 with open(config_path, 'w') as f:
     json.dump(config, f, indent=2)
-print('✅ Configured ollama-cli to use ComfyUI at http://127.0.0.1:8188')
 "
 else
     echo "Skipping ComfyUI installation."
+fi
+
+# 6. Install Piper TTS
+echo ""
+echo "-------------------------------------------"
+read -p "Do you want to install Piper TTS (High-Quality Voice)? (y/n) " -n 1 -r
+echo ""
+if [[ $REPLY =~ ^[Yy]$ ]]; then
+    PIPER_DIR="$HOME/.ollama-cli/piper"
+    mkdir -p "$PIPER_DIR"
+    cd "$PIPER_DIR"
+    
+    if [ ! -f "piper" ]; then
+        echo "[*] Downloading Piper binary..."
+        # Detect architecture for Piper download
+        OS_TYPE=$(uname -s | tr '[:upper:]' '[:lower:]')
+        ARCH_TYPE=$(uname -m)
+        if [[ "$OS_TYPE" == "darwin" ]]; then
+            # macOS uses the apple silicon or intel build
+            curl -L "https://github.com/rhasspy/piper/releases/download/v1.2.0/piper_macos_x86_64.tar.gz" -o piper.tar.gz
+        else
+            curl -L "https://github.com/rhasspy/piper/releases/download/v1.2.0/piper_amd64.tar.gz" -o piper.tar.gz
+        fi
+        tar -xzf piper.tar.gz
+        # Move binary to top level
+        mv piper/piper .
+        mv piper/lib* . || true
+        rm -rf piper piper.tar.gz
+    fi
+
+    if [ ! -f "voice.onnx" ]; then
+        echo "[*] Downloading High-Quality Voice Model (en_US-lessac-medium)..."
+        curl -L "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium/en_US-lessac-medium.onnx" -o voice.onnx
+        curl -L "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium/en_US-lessac-medium.onnx.json" -o voice.onnx.json
+    fi
+    echo "✅ Piper TTS installed."
+else
+    echo "Skipping Piper installation."
 fi
 
 echo ""
