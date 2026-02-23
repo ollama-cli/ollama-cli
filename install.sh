@@ -78,26 +78,26 @@ if [[ $REPLY =~ ^[Yy]$ ]]; then
         echo "[*] Installing ComfyUI dependencies..."
         pip3 install -r requirements.txt
         echo "✅ ComfyUI installed."
-        
-        # 5. Download Image Generation Model
-        echo ""
-        echo "[*] Downloading Image Generation Model (DreamShaper 8)..."
-        MODEL_DIR="models/checkpoints"
-        mkdir -p "$MODEL_DIR"
-        MODEL_PATH="$MODEL_DIR/dreamshaper_8.safetensors"
-        if [ ! -f "$MODEL_PATH" ]; then
-            echo "    This may take a few minutes (approx. 2GB)..."
-            curl -L "https://huggingface.co/Lykon/DreamShaper/resolve/main/DreamShaper_8_pruned.safetensors" -o "$MODEL_PATH"
-            echo "✅ Model downloaded."
-        else
-            echo "✅ Model already exists."
-        fi
-
-        echo ""
-        echo "[!] To use Image Generation, you must start ComfyUI:"
-        echo "    cd $INSTALL_DIR"
-        echo "    python3 main.py"
     fi
+
+    # 5. Download Image Generation Model
+    echo ""
+    echo "[*] Downloading Image Generation Model (DreamShaper 8)..."
+    MODEL_DIR="$INSTALL_DIR/models/checkpoints"
+    mkdir -p "$MODEL_DIR"
+    MODEL_PATH="$MODEL_DIR/dreamshaper_8_pruned.safetensors"
+    if [ ! -f "$MODEL_PATH" ]; then
+        echo "    This may take a few minutes (approx. 2GB)..."
+        curl -L "https://huggingface.co/Lykon/DreamShaper/resolve/main/DreamShaper_8_pruned.safetensors" -o "$MODEL_PATH"
+        echo "✅ Model downloaded."
+    else
+        echo "✅ Model already exists."
+    fi
+
+    echo ""
+    echo "[!] To use Image Generation, you must start ComfyUI:"
+    echo "    cd $INSTALL_DIR"
+    echo "    python3 main.py"
     
     # Update config to point to ComfyUI
     python3 -c "
@@ -120,39 +120,85 @@ fi
 # 6. Install Piper TTS
 echo ""
 echo "-------------------------------------------"
-read -p "Do you want to install Piper TTS (High-Quality Voice)? (y/n) " -n 1 -r
-echo ""
-if [[ $REPLY =~ ^[Yy]$ ]]; then
-    PIPER_DIR="$HOME/.ollama-cli/piper"
-    mkdir -p "$PIPER_DIR"
-    cd "$PIPER_DIR"
-    
-    if [ ! -f "piper" ]; then
+PIPER_DIR="$HOME/.ollama-cli/piper"
+if [ -f "$PIPER_DIR/piper" ]; then
+    echo "✅ Piper TTS is already installed in $PIPER_DIR"
+elif command -v piper &> /dev/null; then
+    echo "✅ Piper TTS found in your PATH."
+else
+    read -p "Do you want to install Piper TTS (High-Quality Voice)? (y/n) " -n 1 -r
+    echo ""
+    if [[ $REPLY =~ ^[Yy]$ ]]; then
+        mkdir -p "$PIPER_DIR"
+        cd "$PIPER_DIR"
+        
         echo "[*] Downloading Piper binary..."
-        # Detect architecture for Piper download
         OS_TYPE=$(uname -s | tr '[:upper:]' '[:lower:]')
         ARCH_TYPE=$(uname -m)
+        
         if [[ "$OS_TYPE" == "darwin" ]]; then
-            # macOS uses the apple silicon or intel build
-            curl -L "https://github.com/rhasspy/piper/releases/download/v1.2.0/piper_macos_x86_64.tar.gz" -o piper.tar.gz
+            if [[ "$ARCH_TYPE" == "arm64" ]]; then
+                URL="https://github.com/rhasspy/piper/releases/download/v1.2.0/piper_macos_aarch64.tar.gz"
+            else
+                URL="https://github.com/rhasspy/piper/releases/download/v1.2.0/piper_macos_x86_64.tar.gz"
+            fi
         else
-            curl -L "https://github.com/rhasspy/piper/releases/download/v1.2.0/piper_amd64.tar.gz" -o piper.tar.gz
+            URL="https://github.com/rhasspy/piper/releases/download/v1.2.0/piper_amd64.tar.gz"
         fi
-        tar -xzf piper.tar.gz
-        # Move binary to top level
-        mv piper/piper .
-        mv piper/lib* . || true
-        rm -rf piper piper.tar.gz
-    fi
+        
+        curl -L "$URL" -o piper.tar.gz
+        if [ ! -s piper.tar.gz ]; then
+            echo "Error: Download failed."
+        else
+            tar -xzf piper.tar.gz
+            mv piper/piper .
+            mv piper/lib* . || true
+            rm -rf piper piper.tar.gz
+            echo "✅ Piper binary installed."
+        fi
 
-    if [ ! -f "voice.onnx" ]; then
-        echo "[*] Downloading High-Quality Voice Model (en_US-lessac-medium)..."
-        curl -L "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium/en_US-lessac-medium.onnx" -o voice.onnx
-        curl -L "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium/en_US-lessac-medium.onnx.json" -o voice.onnx.json
+        if [ ! -f "voice.onnx" ]; then
+            echo "[*] Downloading High-Quality Voice Model..."
+            curl -L "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium/en_US-lessac-medium.onnx" -o voice.onnx
+            curl -L "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium/en_US-lessac-medium.onnx.json" -o voice.onnx.json
+            echo "✅ Voice model downloaded."
+        fi
     fi
-    echo "✅ Piper TTS installed."
+fi
+
+# 7. Install Kokoro TTS (Optional - Ultra Realistic)
+echo ""
+echo "-------------------------------------------"
+read -p "Do you want to install Kokoro TTS (Ultra-Realistic human voice)? (y/n) " -n 1 -r
+echo ""
+if [[ $REPLY =~ ^[Yy]$ ]]; then
+    echo "[*] Installing Kokoro dependencies..."
+    # Kokoro is best installed via pip in a venv
+    KOKORO_DIR="$HOME/.ollama-cli/kokoro"
+    mkdir -p "$KOKORO_DIR"
+    python3 -m venv "$KOKORO_DIR/venv"
+    source "$KOKORO_DIR/venv/bin/activate"
+    pip install kokoro>=0.3.4 soundfile
+    
+    # Update config to prioritize Kokoro
+    python3 -c "
+import json
+import os
+config_path = os.path.expanduser('~/.ollama-cli-config.json')
+if os.path.exists(config_path):
+    with open(config_path, 'r') as f:
+        config = json.load(f)
+else:
+    config = {}
+config['tts_engine'] = 'kokoro'
+config['kokoro_path'] = os.path.expanduser('~/.ollama-cli/kokoro/venv/bin/python')
+with open(config_path, 'w') as f:
+    json.dump(config, f, indent=2)
+"
+    echo "✅ Kokoro TTS installed and set as default."
+    deactivate
 else
-    echo "Skipping Piper installation."
+    echo "Skipping Kokoro installation."
 fi
 
 echo ""
