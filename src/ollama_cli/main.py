@@ -30,7 +30,7 @@ from ollama_cli.core.ollama import OllamaClient
 from ollama_cli.core.sessions import save_session, load_session, list_sessions
 from ollama_cli.ui.formatter import console, print_markdown, print_error, print_status, StreamingDisplay
 from prompt_toolkit.formatted_text import HTML
-from ollama_cli.ui.repl import REPL
+from ollama_cli.ui.repl import REPL, CheckpointRestore
 from ollama_cli.tools.base import registry
 import ollama_cli.tools.filesystem
 import ollama_cli.tools.system
@@ -58,6 +58,8 @@ class OllamaCLI:
         self.auto_model = True
         self.system_prompt = self._build_system_prompt()
         self.max_tool_iterations = 5
+        self.checkpoints = []  # list of (messages_copy, model) tuples
+        self.max_checkpoints = 5
 
     def _build_system_prompt(self) -> str:
         base_prompt = """You are a highly capable AI assistant powered by Ollama. 
@@ -93,6 +95,51 @@ You can call multiple tools in one response by repeating the block above."""
 
     def reset_messages(self):
         self.messages = [{"role": "system", "content": self.system_prompt}]
+
+    def _save_checkpoint(self, prompt_text: str = ""):
+        """Save current conversation state as a checkpoint."""
+        import copy
+        self.checkpoints.append((copy.deepcopy(self.messages), self.current_model, prompt_text))
+        if len(self.checkpoints) > self.max_checkpoints:
+            self.checkpoints.pop(0)
+
+    def _restore_checkpoint(self):
+        """Show checkpoint list and let user pick which to restore."""
+        if not self.checkpoints:
+            print_status("No checkpoints to restore.")
+            return
+
+        # Build list with stored prompt text
+        console.print("\n[bold cyan]Checkpoints (restore to before this prompt):[/bold cyan]")
+        for i, (msgs, model, prompt_text) in enumerate(self.checkpoints):
+            preview = prompt_text[:60] if prompt_text else "(start of conversation)"
+            if len(prompt_text) > 60:
+                preview += "..."
+            console.print(f"  [dim]{i + 1}.[/dim] {preview}")
+        console.print("")
+
+        try:
+            from prompt_toolkit import prompt as pt_prompt
+            choice = pt_prompt("Restore checkpoint: ").strip()
+        except (KeyboardInterrupt, EOFError):
+            choice = ""
+
+        if not choice:
+            print_status("Cancelled.")
+            return
+
+        if not choice.lstrip('-').isdigit() or not (1 <= int(choice) <= len(self.checkpoints)):
+            print_error(f"Invalid selection: {choice}. Enter a number between 1 and {len(self.checkpoints)}.")
+            return
+
+        idx = int(choice) - 1
+        msgs, model, prompt_text = self.checkpoints[idx]
+        # Discard this and all later checkpoints
+        self.checkpoints = self.checkpoints[:idx]
+        self.messages = msgs
+        self.current_model = model
+        print_status(f"Restored to before: [dim]{prompt_text[:60]}[/dim]")
+        print_status(f"Model: [bold green]{model}[/bold green] ({len(self.checkpoints)} checkpoints remaining)")
 
     def handle_command(self, user_input: str) -> bool:
         """Handle slash commands."""
@@ -363,23 +410,30 @@ You can call multiple tools in one response by repeating the block above."""
             print_status(f"Notification listener active on topic: {self.config['ntfy']['topic']}")
 
         while True:
-            user_input = self.repl.get_input()
-            
+            try:
+                user_input = self.repl.get_input()
+            except CheckpointRestore:
+                self._restore_checkpoint()
+                continue
+
             if not user_input:
                 continue
-                
+
             if self.handle_command(user_input):
                 continue
-                
+
+            # Save checkpoint before processing the prompt
+            self._save_checkpoint(user_input)
+
             self.messages.append({"role": "user", "content": user_input})
-            
+
             # Auto-select best model for the task when in auto mode
             if self.auto_model and not self.current_model.startswith("llama3.2-vision"):
                 task_model = self.client.select_best_model(user_input, self.available_models, self.current_model)
                 if task_model != self.current_model:
                     print_status(f"Auto-switching to [bold green]{task_model}[/bold green]...")
                     self.current_model = task_model
-                
+
             self.process_chat_cycle()
 
     def process_chat_cycle(self):
