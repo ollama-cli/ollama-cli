@@ -14,6 +14,8 @@ dependencies = [
     "rich",
     "prompt_toolkit",
     "websocket-client",
+    "ddgs",
+    "beautifulsoup4",
 ]
 requires-python = ">=3.8"
 
