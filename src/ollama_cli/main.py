@@ -29,6 +29,7 @@ from ollama_cli.core.config import load_config, save_config, update_config
 from ollama_cli.core.ollama import OllamaClient
 from ollama_cli.core.sessions import save_session, load_session, list_sessions
 from ollama_cli.ui.formatter import console, print_markdown, print_error, print_status, StreamingDisplay
+from prompt_toolkit.formatted_text import HTML
 from ollama_cli.ui.repl import REPL
 from ollama_cli.tools.base import registry
 import ollama_cli.tools.filesystem
@@ -54,6 +55,7 @@ class OllamaCLI:
         self.messages = []
         self.available_models = []
         self.current_model = self.config.get("default_model", "llama3.2")
+        self.auto_model = True
         self.system_prompt = self._build_system_prompt()
         self.max_tool_iterations = 5
 
@@ -209,11 +211,55 @@ You can call multiple tools in one response by repeating the block above."""
                 print_status(f"Available models: {', '.join(self.available_models)}")
             elif cmd == '/model':
                 if len(parts) > 1:
-                    self.current_model = parts[1]
-                    update_config("default_model", self.current_model)
-                    print_status(f"Switched to model: {self.current_model}")
+                    if parts[1].lower() in ('auto', '0'):
+                        self.auto_model = True
+                        print_status("Switched to [bold green]auto[/bold green] model selection")
+                    else:
+                        if not self.available_models:
+                            self.available_models = self.client.get_available_models()
+                        if parts[1] in self.available_models:
+                            self.current_model = parts[1]
+                            self.auto_model = False
+                            update_config("default_model", self.current_model)
+                            print_status(f"Switched to model: {self.current_model}")
+                        else:
+                            print_error(f"Unknown model: {parts[1]}. Use /model to see available models.")
                 else:
-                    print_status(f"Current model: {self.current_model}")
+                    self.available_models = self.client.get_available_models()
+                    if not self.available_models:
+                        print_error("No models found. Make sure Ollama is running.")
+                    else:
+                        mode = "[bold green]auto[/bold green]" if self.auto_model else self.current_model
+                        console.print(f"[bold cyan]Current model:[/bold cyan] {mode}\n")
+                        auto_marker = " [bold green]*[/bold green]" if self.auto_model else ""
+                        console.print(f"  [dim]0.[/dim] auto{auto_marker}")
+                        for i, model in enumerate(self.available_models, 1):
+                            marker = " [bold green]*[/bold green]" if not self.auto_model and model == self.current_model else ""
+                            console.print(f"  [dim]{i}.[/dim] {model}{marker}")
+                        console.print("")
+                        try:
+                            choice = self.repl.session.prompt(
+                                HTML('<prompt>Select model (number or name, empty to cancel): </prompt>'),
+                                style=self.repl.style
+                            ).strip()
+                        except (KeyboardInterrupt, EOFError):
+                            choice = ""
+                        if choice:
+                            if choice == '0' or choice.lower() == 'auto':
+                                self.auto_model = True
+                                print_status("Switched to [bold green]auto[/bold green] model selection")
+                            elif choice.lstrip('-').isdigit() and 1 <= int(choice) <= len(self.available_models):
+                                self.current_model = self.available_models[int(choice) - 1]
+                                self.auto_model = False
+                                update_config("default_model", self.current_model)
+                                print_status(f"Switched to model: {self.current_model}")
+                            elif choice in self.available_models:
+                                self.current_model = choice
+                                self.auto_model = False
+                                update_config("default_model", self.current_model)
+                                print_status(f"Switched to model: {self.current_model}")
+                            else:
+                                print_error(f"Invalid selection: {choice}")
             elif cmd == '/sessions':
                 sessions = list_sessions()
                 print_status(f"Recent sessions: {', '.join(sessions[:10])}")
@@ -322,12 +368,11 @@ You can call multiple tools in one response by repeating the block above."""
                 
             self.messages.append({"role": "user", "content": user_input})
             
-            # Auto-select best model for the task (Reasoning model)
-            # This happens before the chat cycle, so the first response is from the right model
-            if not self.current_model.startswith("llama3.2-vision"): # Only auto-switch away from vision model if it's currently selected
+            # Auto-select best model for the task when in auto mode
+            if self.auto_model and not self.current_model.startswith("llama3.2-vision"):
                 task_model = self.client.select_best_model(user_input, self.available_models, self.current_model)
                 if task_model != self.current_model:
-                    print_status(f"Switching to [bold green]{task_model}[/bold green] for reasoning...")
+                    print_status(f"Auto-switching to [bold green]{task_model}[/bold green]...")
                     self.current_model = task_model
                 
             self.process_chat_cycle()
