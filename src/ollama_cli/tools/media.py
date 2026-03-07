@@ -7,8 +7,97 @@ import random
 import uuid
 import time
 from .base import tool
-from ..core.config import load_config
-from ..ui.formatter import print_status, console
+from ..core.config import load_config, update_config
+from ..ui.formatter import print_status, print_error, console
+
+
+def _is_comfy_running(comfy_url: str) -> bool:
+    """Check if ComfyUI is reachable."""
+    try:
+        requests.get(comfy_url + "/queue", timeout=3)
+        return True
+    except Exception:
+        return False
+
+
+def _find_comfy_main(comfy_path: str):
+    """Return the path to ComfyUI's main.py if it exists."""
+    expanded = os.path.expanduser(comfy_path)
+    main_py = os.path.join(expanded, "main.py")
+    if os.path.exists(main_py):
+        return main_py
+    return None
+
+
+def _prompt_comfy_path():
+    """Ask the user for the ComfyUI install path."""
+    from prompt_toolkit import prompt as pt_prompt
+    try:
+        path = pt_prompt("Enter ComfyUI path (or empty to cancel): ").strip()
+    except (KeyboardInterrupt, EOFError):
+        return None
+    if not path:
+        return None
+    expanded = os.path.expanduser(path)
+    if not os.path.exists(os.path.join(expanded, "main.py")):
+        print_error(f"No main.py found in {expanded}. Not a valid ComfyUI directory.")
+        return None
+    # Save so we never ask again
+    update_config("comfy_path", path)
+    print_status(f"ComfyUI path saved to config: {path}")
+    return expanded
+
+
+def _start_comfy(config: dict) -> bool:
+    """Auto-start ComfyUI in the background. Prompts for path if needed."""
+    comfy_path = config.get("comfy_path", "~/ComfyUI")
+    main_py = _find_comfy_main(comfy_path)
+
+    if not main_py:
+        print_error(f"ComfyUI not found at {os.path.expanduser(comfy_path)}")
+        resolved = _prompt_comfy_path()
+        if not resolved:
+            return False
+        comfy_path = resolved
+        main_py = os.path.join(resolved, "main.py")
+
+    comfy_url = config.get("comfy_url", "http://127.0.0.1:8188").rstrip("/")
+    expanded = os.path.expanduser(comfy_path)
+    print_status(f"Starting ComfyUI from [bold]{expanded}[/bold]...")
+
+    # Parse port from comfy_url
+    try:
+        from urllib.parse import urlparse
+        port = urlparse(comfy_url).port or 8188
+    except Exception:
+        port = 8188
+
+    subprocess.Popen(
+        [sys.executable, main_py, "--listen", "127.0.0.1", "--port", str(port)],
+        cwd=expanded,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+    # Wait for it to become ready
+    for i in range(30):
+        time.sleep(2)
+        if _is_comfy_running(comfy_url):
+            print_status("ComfyUI is ready.")
+            return True
+        if i % 5 == 4:
+            print_status("Still waiting for ComfyUI to start...")
+
+    print_error("ComfyUI failed to start within 60 seconds.")
+    return False
+
+
+def _ensure_comfy(config: dict) -> bool:
+    """Ensure ComfyUI is running, auto-starting if needed."""
+    comfy_url = config.get("comfy_url", "http://127.0.0.1:8188").rstrip("/")
+    if _is_comfy_running(comfy_url):
+        return True
+    return _start_comfy(config)
 
 @tool(
     name="get_comfy_status",
@@ -20,6 +109,8 @@ from ..ui.formatter import print_status, console
 def get_comfy_status(prompt_id: str = "") -> str:
     """Queries the ComfyUI API for queue or history status"""
     config = load_config()
+    if not _ensure_comfy(config):
+        return "Error: ComfyUI is not running and could not be started."
     comfy_url = config.get("comfy_url", "http://127.0.0.1:8188").rstrip("/")
     
     try:
@@ -65,6 +156,8 @@ def get_comfy_status(prompt_id: str = "") -> str:
 def generate_image(prompt: str, width: int = 512, height: int = 512) -> str:
     """Invokes the ComfyUI API with WebSocket for realtime progress tracking"""
     config = load_config()
+    if not _ensure_comfy(config):
+        return "Error: ComfyUI is not running and could not be started."
     comfy_url = config.get("comfy_url", "http://127.0.0.1:8188").rstrip("/")
     image_model = config.get("image_model", "dreamshaper_8_pruned.safetensors")
     

@@ -150,6 +150,7 @@ You can call multiple tools in one response by repeating the block above."""
 [bold]Configuration:[/bold]
   /config ollama <url>       - Set Ollama server URL
   /config comfy <url>        - Set ComfyUI server URL
+  /config comfy_path <path>  - Set ComfyUI install directory
   /config comfy_output <path> - Set ComfyUI output folder path
   /config piper_path <path>  - Set path to Piper binary
   /config piper_model <path> - Set path to Piper voice model
@@ -162,6 +163,7 @@ You can call multiple tools in one response by repeating the block above."""
 [bold cyan]Current Configuration:[/bold cyan]
   [blue]Ollama URL:[/blue]  {cfg.get('ollama_url')}
   [blue]ComfyUI URL:[/blue] {cfg.get('comfy_url')}
+  [blue]ComfyUI Path:[/blue] {cfg.get('comfy_path')}
   [blue]Comfy Output:[/blue] {cfg.get('comfy_output_path')}
   [blue]Image Model:[/blue] {cfg.get('image_model')}
   [blue]Vision Model:[/blue]{cfg.get('vision_model')}
@@ -183,6 +185,9 @@ You can call multiple tools in one response by repeating the block above."""
                     elif subcmd == 'vision':
                         update_config("vision_model", val)
                         print_status(f"Vision model updated to: {val}")
+                    elif subcmd == 'comfy_path':
+                        update_config("comfy_path", val)
+                        print_status(f"ComfyUI install path updated to: {val}")
                     elif subcmd == 'comfy_output':
                         update_config("comfy_output_path", val)
                         print_status(f"ComfyUI output path updated to: {val}")
@@ -197,9 +202,9 @@ You can call multiple tools in one response by repeating the block above."""
                         save_config(cfg)
                         print_status(f"Piper model path updated to: {val}")
                     else:
-                        print_error("Usage: /config <ollama|comfy|comfy_output|piper_path|piper_model> <value>")
+                        print_error("Usage: /config <ollama|comfy|comfy_path|comfy_output|piper_path|piper_model> <value>")
                 else:
-                    print_error("Usage: /config <ollama|comfy|comfy_output|piper_path|piper_model> <value>")
+                    print_error("Usage: /config <ollama|comfy|comfy_path|comfy_output|piper_path|piper_model> <value>")
             elif cmd == '/quit':
                 print_status("Goodbye!")
                 sys.exit(0)
