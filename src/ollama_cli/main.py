@@ -141,6 +141,86 @@ You can call multiple tools in one response by repeating the block above."""
         print_status(f"Restored to before: [dim]{prompt_text[:60]}[/dim]")
         print_status(f"Model: [bold green]{model}[/bold green] ({len(self.checkpoints)} checkpoints remaining)")
 
+    def _estimate_tokens(self, text: str) -> int:
+        """Rough token estimate (~4 chars per token)."""
+        return len(text) // 4
+
+    def _show_context(self):
+        """Show context window usage."""
+        ctx_len = self.client.get_context_length(self.current_model)
+
+        # Calculate token usage by category
+        sys_tokens = 0
+        user_tokens = 0
+        assistant_tokens = 0
+        tool_tokens = 0
+
+        for msg in self.messages:
+            content = msg.get("content", "")
+            tokens = self._estimate_tokens(content)
+            role = msg.get("role", "")
+            if role == "system":
+                sys_tokens += tokens
+            elif role == "user":
+                # Tool results are injected as user messages with "Tool Result" prefix
+                if content.startswith("Tool Result"):
+                    tool_tokens += tokens
+                else:
+                    user_tokens += tokens
+            elif role == "assistant":
+                assistant_tokens += tokens
+
+        total_used = sys_tokens + user_tokens + assistant_tokens + tool_tokens
+        free = max(0, ctx_len - total_used)
+        pct_used = (total_used / ctx_len * 100) if ctx_len else 0
+
+        # Visual bar — each segment colored by category proportion
+        bar_width = 20
+        # Calculate proportional segments
+        segments = [
+            ("green", sys_tokens),
+            ("blue", user_tokens),
+            ("magenta", assistant_tokens),
+            ("yellow", tool_tokens),
+        ]
+        bar_chars = ""
+        cells_placed = 0
+        for color, tokens in segments:
+            n_cells = round(tokens / ctx_len * bar_width) if ctx_len else 0
+            for _ in range(n_cells):
+                if cells_placed < bar_width:
+                    bar_chars += f"[bold {color}]⛁[/bold {color}] "
+                    cells_placed += 1
+        # Overflow cells (over context limit)
+        while cells_placed < min(filled_total := round(total_used / ctx_len * bar_width) if ctx_len else 0, bar_width):
+            bar_chars += "[bold red]⛁[/bold red] "
+            cells_placed += 1
+        # Free space cells
+        while cells_placed < bar_width:
+            bar_chars += "[dim]⛶[/dim] "
+            cells_placed += 1
+
+        def _fmt(n):
+            if n >= 1000:
+                return f"{n / 1000:.1f}k"
+            return str(n)
+
+        pct_str = f"{pct_used:.0f}%"
+        if pct_used > 100:
+            pct_str = f"[bold red]{pct_used:.0f}% OVERFLOW[/bold red]"
+
+        console.print(f"\n[bold cyan]Context Usage[/bold cyan]")
+        console.print(f"  {bar_chars}  {self.current_model}")
+        console.print(f"  {'  ' * bar_width}   {_fmt(total_used)}/{_fmt(ctx_len)} tokens ({pct_str})")
+        console.print(f"")
+        console.print(f"  [bold]Estimated usage by category[/bold]")
+        console.print(f"  [green]⛁[/green] System prompt:  {_fmt(sys_tokens)} tokens")
+        console.print(f"  [blue]⛁[/blue] User messages:  {_fmt(user_tokens)} tokens")
+        console.print(f"  [magenta]⛁[/magenta] Assistant:      {_fmt(assistant_tokens)} tokens")
+        console.print(f"  [yellow]⛁[/yellow] Tool results:   {_fmt(tool_tokens)} tokens")
+        console.print(f"  [dim]⛶[/dim] Free space:     {_fmt(free)} tokens ({max(0, 100 - pct_used):.0f}%)")
+        console.print("")
+
     def handle_command(self, user_input: str) -> bool:
         """Handle slash commands."""
         if not user_input.startswith('/'):
@@ -158,6 +238,14 @@ You can call multiple tools in one response by repeating the block above."""
   /help           - Show this help message
   /quit           - Exit the CLI
   /clear          - Clear conversation history
+  /context        - Show context window usage
+
+[bold]Input:[/bold]
+  Enter           - Submit prompt
+  Alt+Enter / Ctrl+J - Insert newline (multiline input)
+  ESC ESC         - Restore checkpoint
+  Ctrl+C          - Cancel current input / stop response
+  Ctrl+Z          - Suspend (resume with fg)
 
 [bold]Model & Sessions:[/bold]
   /models         - List available models
@@ -255,6 +343,8 @@ You can call multiple tools in one response by repeating the block above."""
             elif cmd == '/quit':
                 print_status("Goodbye!")
                 sys.exit(0)
+            elif cmd == '/context':
+                self._show_context()
             elif cmd == '/clear':
                 self.reset_messages()
                 print_status("History cleared.")

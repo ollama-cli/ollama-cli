@@ -107,6 +107,20 @@ class OllamaClient:
 
         return reasoning_pool[0]
 
+    def get_context_length(self, model: str) -> int:
+        """Get the context window size for a model."""
+        try:
+            response = requests.post(f"{self.base_url}/api/show", json={"name": model}, timeout=5)
+            if response.status_code == 200:
+                data = response.json()
+                model_info = data.get("model_info", {})
+                for key, value in model_info.items():
+                    if "context_length" in key:
+                        return int(value)
+        except Exception:
+            pass
+        return 4096  # conservative default
+
     def describe_image(self, image_path: str, prompt: str = "What is in this image?", model: str = "llama3.2-vision") -> str:
         """Analyze an image using a vision model"""
         import base64

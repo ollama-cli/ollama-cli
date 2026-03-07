@@ -36,6 +36,16 @@ class REPL:
             event.current_buffer.reset()
             event.app.exit(result=_CHECKPOINT_SENTINEL)
 
+        @self.bindings.add('escape', 'enter')
+        def _alt_enter(event):
+            """Alt+Enter: insert newline."""
+            event.current_buffer.insert_text('\n')
+
+        @self.bindings.add('c-j')
+        def _ctrl_j(event):
+            """Ctrl+J: insert newline."""
+            event.current_buffer.insert_text('\n')
+
         self.session = PromptSession(
             history=_FilteredHistory(history_file),
             enable_suspend=True,
