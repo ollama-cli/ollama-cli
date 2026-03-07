@@ -496,7 +496,8 @@ You can call multiple tools in one response by repeating the block above."""
                     
                     result = self.execute_tool(name, params)
                     # Show result to user
-                    print_status(f"Result: [dim]{result}[/dim]")
+                    preview = result[:200] + ("..." if len(result) > 200 else "")
+                    print_status(f"Result: [dim]{preview}[/dim]")
                     results.append(f"Tool Result ({name}):\n{result}")
                 
                 if not results:
