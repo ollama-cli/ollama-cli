@@ -8,6 +8,7 @@ import sys
 import os
 import json
 import re
+import signal
 import logging
 from typing import List, Dict, Optional, Tuple
 
@@ -338,11 +339,17 @@ You can call multiple tools in one response by repeating the block above."""
             full_response = ""
             try:
                 print_status(f"Thinking ([dim]{self.current_model}[/dim])...")
-                with StreamingDisplay() as display:
-                    for chunk in self.client.chat(self.messages, self.current_model):
-                        display.update(chunk)
-                        full_response += chunk
-                
+                try:
+                    with StreamingDisplay() as display:
+                        for chunk in self.client.chat(self.messages, self.current_model):
+                            display.update(chunk)
+                            full_response += chunk
+                except KeyboardInterrupt:
+                    print_status("Response interrupted.")
+                    if full_response:
+                        self.messages.append({"role": "assistant", "content": full_response})
+                    return
+
                 self.messages.append({"role": "assistant", "content": full_response})
                 
                 # Check for tool calls
@@ -539,6 +546,12 @@ You can call multiple tools in one response by repeating the block above."""
         return f"Unknown tool: {name}"
 
 def main():
+    # Ensure Ctrl+Z (SIGTSTP) uses the default handler so the process can be
+    # suspended and resumed with fg.  Some libraries (e.g. prompt_toolkit) may
+    # override this; restoring SIG_DFL lets the OS handle it natively.
+    if hasattr(signal, "SIGTSTP"):
+        signal.signal(signal.SIGTSTP, signal.SIG_DFL)
+
     try:
         cli = OllamaCLI()
         cli.run()

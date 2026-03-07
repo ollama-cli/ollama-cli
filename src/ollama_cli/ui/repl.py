@@ -7,7 +7,7 @@ import os
 class REPL:
     def __init__(self):
         history_file = os.path.expanduser("~/.ollama-cli-history")
-        self.session = PromptSession(history=FileHistory(history_file))
+        self.session = PromptSession(history=FileHistory(history_file), enable_suspend=True)
         self.style = Style.from_dict({
             'prompt': 'ansicyan bold',
             'command': 'ansigreen',
