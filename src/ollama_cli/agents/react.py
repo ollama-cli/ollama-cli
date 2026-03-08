@@ -204,18 +204,22 @@ class ReACTAgent:
         for name in self.allowed_tools:
             tool = registry.get_tool(name)
             if tool:
-                tool_desc += f"- {name}: {tool.description}\n"
-                tool_desc += f"  Parameters: {json.dumps(tool.parameters)}\n"
+                # Show simple param names, not full schema (small models copy schemas)
+                param_names = list(tool.parameters.keys())
+                tool_desc += f"- {name}({', '.join(param_names)}): {tool.description}\n"
 
         context_block = f"\nAdditional instructions from orchestrator:\n{self.context}\n" if self.context else ""
 
         return f"""You are a focused agent working on a specific task.
-You have access to tools to help you. When you need a tool, use this format:
+When you need a tool, use EXACTLY this format:
 
 <tool_call>
-<tool_name>name</tool_name>
-<parameters>{{"param": "value"}}</parameters>
+<tool_name>web_search</tool_name>
+<parameters>{{"query": "your search terms"}}</parameters>
 </tool_call>
+
+IMPORTANT: Parameters must be a JSON object with simple string/number values.
+For example: {{"query": "weather in Cork", "max_results": 3}}
 
 Available tools:
 {tool_desc}
@@ -264,6 +268,9 @@ RULES:
             # ACT + OBSERVE for each tool call
             results = []
             for name, params in tool_calls:
+                # Validate params — fix common LLM mistakes
+                params = self._validate_params(name, params)
+
                 call_key = f"{name}:{json.dumps(params, sort_keys=True)}"
                 if call_key in self.executed_calls:
                     continue
@@ -273,6 +280,18 @@ RULES:
                                         tool=name, params=params)
 
                 result = execute_tool(name, params)
+
+                # If the tool errored due to bad params, tell the LLM to retry
+                if result.startswith("Error executing") or result.startswith("Search error"):
+                    self.mailbox.write_step(self.agent_id, "observe",
+                                            tool=name, content=f"PARAM ERROR: {result}")
+                    results.append(
+                        f"Tool Error ({name}): {result}\n"
+                        f"Your parameters were: {json.dumps(params)}\n"
+                        f"Please fix the parameters and try again. "
+                        f"Parameters must be simple values, not objects."
+                    )
+                    continue
 
                 self.mailbox.write_step(self.agent_id, "observe",
                                         tool=name, content=result[:2000])
@@ -293,6 +312,38 @@ RULES:
 
         # Hit max iterations
         return self._summarize("Reached maximum iterations without a final answer.")
+
+    @staticmethod
+    def _validate_params(tool_name: str, params: Dict) -> Dict:
+        """Fix common LLM mistakes in tool parameters.
+
+        - Unwrap nested objects: {"query": {"value": "X"}} → {"query": "X"}
+        - Unwrap schema copies: {"query": {"type": "string", ...}} → extract value
+        - Ensure values are simple types (str, int, float, bool)
+        """
+        fixed = {}
+        for k, v in params.items():
+            if isinstance(v, dict):
+                # LLM wrapped the value in an object — try to extract
+                if "value" in v:
+                    fixed[k] = v["value"]
+                elif "description" in v and len(v) > 1:
+                    # Schema copy — look for any non-meta key
+                    for dk, dv in v.items():
+                        if dk not in ("type", "description", "optional", "default"):
+                            fixed[k] = dv
+                            break
+                    else:
+                        # All keys are meta — skip this param
+                        continue
+                else:
+                    # Unknown nested dict — stringify it
+                    fixed[k] = str(v)
+            elif isinstance(v, list):
+                fixed[k] = ", ".join(str(x) for x in v)
+            else:
+                fixed[k] = v
+        return fixed
 
     def _call_llm(self) -> str:
         """Call Ollama and collect the full response."""

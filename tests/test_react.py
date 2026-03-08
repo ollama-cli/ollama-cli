@@ -68,6 +68,41 @@ class TestParseToolCalls(unittest.TestCase):
         self.assertEqual(len(calls), 1)
 
 
+class TestValidateParams(unittest.TestCase):
+
+    def test_simple_params_unchanged(self):
+        result = ReACTAgent._validate_params("web_search", {"query": "test", "max_results": 5})
+        self.assertEqual(result, {"query": "test", "max_results": 5})
+
+    def test_unwrap_value_key(self):
+        """LLM wraps value: {"query": {"value": "test"}}"""
+        result = ReACTAgent._validate_params("web_search", {"query": {"value": "test"}})
+        self.assertEqual(result["query"], "test")
+
+    def test_unwrap_schema_copy(self):
+        """LLM copies schema: {"query": {"type": "string", "description": "...", "value": "test"}}"""
+        result = ReACTAgent._validate_params("web_search", {
+            "query": {"type": "string", "description": "The search query", "value": "weather Cork"}
+        })
+        self.assertEqual(result["query"], "weather Cork")
+
+    def test_pure_schema_no_value(self):
+        """LLM copies schema without value: {"query": {"type": "string", "description": "..."}}"""
+        result = ReACTAgent._validate_params("web_search", {
+            "query": {"type": "string", "description": "The search query"}
+        })
+        # Should be skipped — no usable value
+        self.assertNotIn("query", result)
+
+    def test_list_to_string(self):
+        result = ReACTAgent._validate_params("test", {"tags": ["a", "b", "c"]})
+        self.assertEqual(result["tags"], "a, b, c")
+
+    def test_nested_dict_stringified(self):
+        result = ReACTAgent._validate_params("test", {"data": {"foo": "bar"}})
+        self.assertIsInstance(result["data"], str)
+
+
 class TestExecuteTool(unittest.TestCase):
 
     def test_unknown_tool(self):

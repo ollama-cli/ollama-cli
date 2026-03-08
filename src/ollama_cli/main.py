@@ -30,6 +30,7 @@ from ollama_cli.core.ollama import OllamaClient
 from ollama_cli.core.sessions import save_session, load_session, list_sessions, generate_session_id, get_session_preview, get_mailbox_dir
 from ollama_cli.agents.mailbox import Mailbox
 from ollama_cli.agents.worker import spawn_agent, poll_agent, stop_agent
+from ollama_cli.agents.planner import plan as plan_subtasks
 from ollama_cli.ui.formatter import console, print_markdown, print_error, print_status, StreamingDisplay
 from prompt_toolkit.formatted_text import HTML
 from ollama_cli.ui.repl import REPL, CheckpointRestore
@@ -370,6 +371,91 @@ You can call multiple tools in one response by repeating the block above."""
                 })
             elif status == "error":
                 print_error(f"Agent {agent_id} failed. Use /agent peek {agent_id} for details.")
+
+    def _try_delegate(self, user_input: str) -> bool:
+        """Ask the planner if this task should be delegated to subagents.
+
+        Returns True if delegation happened (caller should skip normal chat).
+        Returns False if the task should be handled directly.
+        """
+        import time
+
+        print_status(f"Planning ([dim]{self.current_model}[/dim])...")
+        subtasks = plan_subtasks(self.client, self.current_model, user_input)
+
+        if not subtasks:
+            return False
+
+        # Delegate!
+        console.print(f"\n[bold cyan]Breaking into {len(subtasks)} subtasks:[/bold cyan]")
+        agent_ids = []
+        for i, st in enumerate(subtasks):
+            agent_id = self._next_agent_id()
+            task = st["task"]
+            tools = st.get("tools", list(registry.tools.keys()))
+            console.print(f"  [dim]{agent_id}[/dim] — {task[:60]}")
+
+            proc = spawn_agent(
+                task=task,
+                model=self.current_model,
+                tools=tools,
+                agent_id=agent_id,
+                mailbox_dir=self.mailbox.base_dir,
+                ollama_url=self.config.get("ollama_url", "http://localhost:11434"),
+            )
+            self._agent_procs[agent_id] = proc
+            agent_ids.append((agent_id, task))
+        console.print("")
+
+        # Wait for all agents to finish
+        print_status("Waiting for subagents...")
+        try:
+            pending = set(aid for aid, _ in agent_ids)
+            while pending:
+                for agent_id in list(pending):
+                    status = poll_agent(agent_id, self.mailbox)
+                    if status in ("success", "done", "error"):
+                        pending.discard(agent_id)
+                        summary = self.mailbox.read_summary(agent_id)
+                        task = next(t for a, t in agent_ids if a == agent_id)
+                        if summary:
+                            console.print(f"  ✓ [bold]{agent_id}[/bold] — {task[:40]}")
+                        else:
+                            console.print(f"  ✗ [bold red]{agent_id}[/bold red] — failed")
+                if pending:
+                    time.sleep(0.5)
+        except KeyboardInterrupt:
+            print_status("Detached. Agents still running in background.")
+            for aid, task in agent_ids:
+                self._pending_agents[aid] = task
+            return True
+
+        # Collect all summaries and feed into orchestrator context
+        summaries = []
+        for agent_id, task in agent_ids:
+            summary = self.mailbox.read_summary(agent_id)
+            if summary:
+                summaries.append(f"[Subtask: {task}]\nResult: {summary}")
+
+        if summaries:
+            combined = "\n\n".join(summaries)
+            self.messages.append({
+                "role": "user",
+                "content": (
+                    f"Subagents completed their research. Here are the results:\n\n"
+                    f"{combined}\n\n"
+                    f"[SYSTEM]: Using ONLY the subagent results above, provide a clear, "
+                    f"complete answer to the user's original question: \"{user_input}\"\n"
+                    f"DO NOT call any tools. DO NOT use placeholders. Just synthesize the data."
+                )
+            })
+            console.print("")
+            # Now run the normal chat cycle to synthesize
+            self.process_chat_cycle()
+        else:
+            print_error("All subagents failed to produce results.")
+
+        return True
 
     def _agent_status(self):
         """Show status of all agents in this session."""
@@ -796,6 +882,10 @@ You can call multiple tools in one response by repeating the block above."""
                 if task_model != self.current_model:
                     print_status(f"Auto-switching to [bold green]{task_model}[/bold green]...")
                     self.current_model = task_model
+
+            # Check if the task should be delegated to subagents
+            if self._try_delegate(user_input):
+                continue
 
             self.process_chat_cycle()
 
