@@ -424,13 +424,16 @@ You can call multiple tools in one response by repeating the block above."""
                     task = st["task"]
                     tools = st.get("tools", list(registry.tools.keys()))
 
-                    # Inject dependency results as context
-                    dep_context = ""
+                    # Build context: orchestrator hint + dependency results
+                    context_parts = []
+                    hint = st.get("hint", "")
+                    if hint:
+                        context_parts.append(f"Orchestrator hint: {hint}")
                     for dep_idx in st.get("depends_on", []):
                         dep_summary = idx_to_summary.get(dep_idx, "")
                         if dep_summary:
                             dep_task = subtasks[dep_idx]["task"]
-                            dep_context += f"Result from prior subtask ({dep_task}): {dep_summary}\n"
+                            context_parts.append(f"Result from prior subtask ({dep_task}): {dep_summary}")
 
                     proc = spawn_agent(
                         task=task,
@@ -439,7 +442,7 @@ You can call multiple tools in one response by repeating the block above."""
                         agent_id=agent_id,
                         mailbox_dir=self.mailbox.base_dir,
                         ollama_url=self.config.get("ollama_url", "http://localhost:11434"),
-                        context=dep_context,
+                        context="\n".join(context_parts),
                     )
                     self._agent_procs[agent_id] = proc
                     idx_to_agent[idx] = agent_id

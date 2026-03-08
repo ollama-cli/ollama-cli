@@ -28,17 +28,18 @@ If the task is COMPLEX, respond with a JSON array of subtasks. Each subtask has:
 - "task": what the subagent should do (a clear, self-contained instruction)
 - "tools": list of tool names needed (from: web_search, read_file, write_file, list_directory, grep_search, run_python, code_analyze_file)
 - "depends_on": (optional) list of subtask indices (0-based) that must finish first
+- "hint": (optional) short strategic instruction to guide the subagent (e.g. "return only the number", "focus on temperature in Celsius", "output as a markdown table")
 
 Example for "compare weather in Cork and Dublin":
 [
-  {"task": "Search for the current weather in Cork, Ireland", "tools": ["web_search"]},
-  {"task": "Search for the current weather in Dublin, Ireland", "tools": ["web_search"]}
+  {"task": "Search for the current weather in Cork, Ireland", "tools": ["web_search"], "hint": "Report temperature in Celsius and conditions only"},
+  {"task": "Search for the current weather in Dublin, Ireland", "tools": ["web_search"], "hint": "Report temperature in Celsius and conditions only"}
 ]
 
 Example for "find the population of France's capital city":
 [
-  {"task": "Find the capital city of France", "tools": ["web_search"]},
-  {"task": "Find the current population of the capital city found in subtask 0", "tools": ["web_search"], "depends_on": [0]}
+  {"task": "Find the capital city of France", "tools": ["web_search"], "hint": "Return only the city name"},
+  {"task": "Find the current population of the capital city found in subtask 0", "tools": ["web_search"], "depends_on": [0], "hint": "Return only the population number"}
 ]
 
 Example for "what is 2+2":
@@ -95,6 +96,7 @@ def plan(client: OllamaClient, model: str, user_input: str) -> Optional[List[dic
                             "task": str(st["task"]),
                             "tools": st.get("tools", ["web_search"]),
                             "depends_on": deps,
+                            "hint": str(st.get("hint", "")),
                         })
                 if len(valid) >= 2:
                     return valid
