@@ -30,7 +30,7 @@ from ollama_cli.core.ollama import OllamaClient
 from ollama_cli.core.sessions import save_session, load_session, list_sessions, generate_session_id, get_session_preview, get_mailbox_dir
 from ollama_cli.agents.mailbox import Mailbox
 from ollama_cli.agents.worker import spawn_agent, poll_agent, stop_agent
-from ollama_cli.agents.planner import plan as plan_subtasks
+from ollama_cli.agents.planner import plan as plan_subtasks, get_execution_waves
 from ollama_cli.ui.formatter import console, print_markdown, print_error, print_status, StreamingDisplay
 from prompt_toolkit.formatted_text import HTML
 from ollama_cli.ui.repl import REPL, CheckpointRestore
@@ -278,7 +278,7 @@ You can call multiple tools in one response by repeating the block above."""
             return
 
         subcmd = parts[1].lower()
-        _subcommands = {'status', 'peek', 'stop', 'help'}
+        _subcommands = {'status', 'peek', 'stop', 'forget', 'help'}
 
         if subcmd == 'status':
             self._agent_status()
@@ -303,6 +303,11 @@ You can call multiple tools in one response by repeating the block above."""
             else:
                 agent_id = parts[2]
             self._agent_stop(agent_id)
+        elif subcmd == 'forget':
+            if len(parts) < 3:
+                print_error("Usage: /agent forget <agent_id>")
+                return
+            self._agent_forget(parts[2])
         elif subcmd == 'help' and len(parts) == 2:
             self._agent_help()
         else:
@@ -317,9 +322,11 @@ You can call multiple tools in one response by repeating the block above."""
   /agent status       - Show all agents and their status
   /agent peek [id]    - Show full execution trace of an agent
   /agent stop [id]    - Stop a running agent and get partial result
+  /agent forget <id>  - Remove agent's summary from context
   /agent help         - Show this help
 
   Agents run in the background. You'll be notified when they finish.
+  Complex tasks are auto-split into parallel subtasks with dependencies.
 """)
 
     def _agent_spawn(self, task: str):
@@ -386,59 +393,102 @@ You can call multiple tools in one response by repeating the block above."""
         if not subtasks:
             return False
 
-        # Delegate!
-        console.print(f"\n[bold cyan]Breaking into {len(subtasks)} subtasks:[/bold cyan]")
-        agent_ids = []
-        for i, st in enumerate(subtasks):
-            agent_id = self._next_agent_id()
-            task = st["task"]
-            tools = st.get("tools", list(registry.tools.keys()))
-            console.print(f"  [dim]{agent_id}[/dim] — {task[:60]}")
+        # Compute execution waves based on dependencies
+        waves = get_execution_waves(subtasks)
+        has_deps = any(st.get("depends_on") for st in subtasks)
 
-            proc = spawn_agent(
-                task=task,
-                model=self.current_model,
-                tools=tools,
-                agent_id=agent_id,
-                mailbox_dir=self.mailbox.base_dir,
-                ollama_url=self.config.get("ollama_url", "http://localhost:11434"),
-            )
-            self._agent_procs[agent_id] = proc
-            agent_ids.append((agent_id, task))
+        console.print(f"\n[bold cyan]Breaking into {len(subtasks)} subtasks"
+                       f"{' (with dependencies)' if has_deps else ''}:[/bold cyan]")
+        for i, st in enumerate(subtasks):
+            deps = st.get("depends_on", [])
+            dep_str = f" [dim](after #{', #'.join(str(d) for d in deps)})[/dim]" if deps else ""
+            console.print(f"  [dim]#{i}[/dim] {st['task'][:60]}{dep_str}")
         console.print("")
 
-        # Wait for all agents to finish
-        print_status("Waiting for subagents...")
+        # Execute wave by wave
+        # Map subtask index → agent_id and results
+        idx_to_agent = {}
+        idx_to_summary = {}
+        all_agent_ids = []  # (agent_id, task) for final collection
+
         try:
-            pending = set(aid for aid, _ in agent_ids)
-            while pending:
-                for agent_id in list(pending):
-                    status = poll_agent(agent_id, self.mailbox)
-                    if status in ("success", "done", "error"):
-                        pending.discard(agent_id)
-                        summary = self.mailbox.read_summary(agent_id)
-                        task = next(t for a, t in agent_ids if a == agent_id)
-                        if summary:
-                            console.print(f"  ✓ [bold]{agent_id}[/bold] — {task[:40]}")
-                        else:
-                            console.print(f"  ✗ [bold red]{agent_id}[/bold red] — failed")
-                if pending:
-                    time.sleep(0.5)
+            for wave_num, wave_indices in enumerate(waves):
+                if len(waves) > 1:
+                    print_status(f"Wave {wave_num + 1}/{len(waves)}...")
+
+                # Spawn all agents in this wave
+                wave_agents = []
+                for idx in wave_indices:
+                    agent_id = self._next_agent_id()
+                    st = subtasks[idx]
+                    task = st["task"]
+                    tools = st.get("tools", list(registry.tools.keys()))
+
+                    # Inject dependency results as context
+                    dep_context = ""
+                    for dep_idx in st.get("depends_on", []):
+                        dep_summary = idx_to_summary.get(dep_idx, "")
+                        if dep_summary:
+                            dep_task = subtasks[dep_idx]["task"]
+                            dep_context += f"Result from prior subtask ({dep_task}): {dep_summary}\n"
+
+                    proc = spawn_agent(
+                        task=task,
+                        model=self.current_model,
+                        tools=tools,
+                        agent_id=agent_id,
+                        mailbox_dir=self.mailbox.base_dir,
+                        ollama_url=self.config.get("ollama_url", "http://localhost:11434"),
+                        context=dep_context,
+                    )
+                    self._agent_procs[agent_id] = proc
+                    idx_to_agent[idx] = agent_id
+                    wave_agents.append((idx, agent_id, task))
+                    all_agent_ids.append((agent_id, task))
+
+                # Wait for this wave to finish
+                pending = set(aid for _, aid, _ in wave_agents)
+                while pending:
+                    for idx, agent_id, task in wave_agents:
+                        if agent_id not in pending:
+                            continue
+                        status = poll_agent(agent_id, self.mailbox)
+                        if status in ("success", "done", "error"):
+                            pending.discard(agent_id)
+                            summary = self.mailbox.read_summary(agent_id)
+                            idx_to_summary[idx] = summary or ""
+                            if summary:
+                                console.print(f"  ✓ [bold]{agent_id}[/bold] — {task[:40]}")
+                            else:
+                                console.print(f"  ✗ [bold red]{agent_id}[/bold red] — failed")
+                    if pending:
+                        time.sleep(0.5)
+
         except KeyboardInterrupt:
             print_status("Detached. Agents still running in background.")
-            for aid, task in agent_ids:
-                self._pending_agents[aid] = task
+            for aid, task in all_agent_ids:
+                if poll_agent(aid, self.mailbox) == "running":
+                    self._pending_agents[aid] = task
             return True
 
-        # Collect all summaries and feed into orchestrator context
+        # Collect all summaries
         summaries = []
-        for agent_id, task in agent_ids:
+        for agent_id, task in all_agent_ids:
             summary = self.mailbox.read_summary(agent_id)
             if summary:
                 summaries.append(f"[Subtask: {task}]\nResult: {summary}")
 
         if summaries:
             combined = "\n\n".join(summaries)
+
+            # Context budget check
+            summary_tokens = self._estimate_tokens(combined)
+            ctx_len = self.client.get_context_length(self.current_model)
+            current_tokens = sum(self._estimate_tokens(m.get("content", "")) for m in self.messages)
+            if current_tokens + summary_tokens > ctx_len * 0.8:
+                console.print(f"[bold yellow]Warning:[/bold yellow] Agent summaries use ~{summary_tokens} tokens. "
+                              f"Context is {int((current_tokens + summary_tokens) / ctx_len * 100)}% full.")
+
             self.messages.append({
                 "role": "user",
                 "content": (
@@ -450,7 +500,6 @@ You can call multiple tools in one response by repeating the block above."""
                 )
             })
             console.print("")
-            # Now run the normal chat cycle to synthesize
             self.process_chat_cycle()
         else:
             print_error("All subagents failed to produce results.")
@@ -553,6 +602,25 @@ You can call multiple tools in one response by repeating the block above."""
         else:
             print_error(f"Agent {agent_id} did not produce a summary within timeout.")
 
+    def _agent_forget(self, agent_id: str):
+        """Remove an agent's summary from orchestrator context and archive mailbox."""
+        before = len(self.messages)
+        self.messages = [
+            m for m in self.messages
+            if not (m.get("role") == "user" and
+                    agent_id in m.get("content", "") and
+                    ("Subagent" in m.get("content", "") or "subtask" in m.get("content", "").lower()))
+        ]
+        removed = before - len(self.messages)
+
+        if removed > 0:
+            freed = sum(self._estimate_tokens(m.get("content", ""))
+                        for m in self.messages[len(self.messages):])  # already removed
+            self.mailbox.cleanup(agent_id, archive=True)
+            print_status(f"Forgot {agent_id}: removed {removed} message(s) from context. Mailbox archived.")
+        else:
+            print_status(f"No context entries found for {agent_id}. Use /agent status to see agents.")
+
     def handle_command(self, user_input: str) -> bool:
         """Handle slash commands."""
         if not user_input.startswith('/'):
@@ -611,6 +679,7 @@ You can call multiple tools in one response by repeating the block above."""
   /agent status       - Show all agents and their status
   /agent peek [id]    - Show full execution trace
   /agent stop [id]    - Stop a running agent
+  /agent forget <id>  - Remove agent results from context
 
 [bold]Integrations:[/bold]
   /mcp connect <name> <cmd> [args] - Connect MCP server

@@ -4,7 +4,7 @@ import json
 import unittest
 from unittest import mock
 
-from ollama_cli.agents.planner import plan
+from ollama_cli.agents.planner import plan, get_execution_waves
 
 
 class FakeClient:
@@ -90,6 +90,92 @@ class TestPlanner(unittest.TestCase):
                 raise ConnectionError("no connection")
         result = plan(ErrorClient(), "model", "test")
         self.assertIsNone(result)
+
+
+class TestDependencies(unittest.TestCase):
+
+    def test_dependencies_parsed(self):
+        response = json.dumps([
+            {"task": "Find capital of France", "tools": ["web_search"]},
+            {"task": "Find population of the capital", "tools": ["web_search"], "depends_on": [0]}
+        ])
+        client = FakeClient(response)
+        result = plan(client, "model", "population of France's capital")
+        self.assertIsNotNone(result)
+        self.assertEqual(result[0]["depends_on"], [])
+        self.assertEqual(result[1]["depends_on"], [0])
+
+    def test_invalid_dep_index_filtered(self):
+        """depends_on referencing a future or out-of-range index is dropped."""
+        response = json.dumps([
+            {"task": "A", "depends_on": [5]},
+            {"task": "B", "depends_on": [0, 99]}
+        ])
+        client = FakeClient(response)
+        result = plan(client, "model", "test")
+        self.assertIsNotNone(result)
+        self.assertEqual(result[0]["depends_on"], [])
+        self.assertEqual(result[1]["depends_on"], [0])
+
+    def test_no_self_dependency(self):
+        """Task cannot depend on itself."""
+        response = json.dumps([
+            {"task": "A"},
+            {"task": "B", "depends_on": [1]}  # self-reference
+        ])
+        client = FakeClient(response)
+        result = plan(client, "model", "test")
+        self.assertEqual(result[1]["depends_on"], [])
+
+
+class TestExecutionWaves(unittest.TestCase):
+
+    def test_all_parallel(self):
+        subtasks = [
+            {"task": "A", "depends_on": []},
+            {"task": "B", "depends_on": []},
+            {"task": "C", "depends_on": []},
+        ]
+        waves = get_execution_waves(subtasks)
+        self.assertEqual(len(waves), 1)
+        self.assertEqual(sorted(waves[0]), [0, 1, 2])
+
+    def test_simple_chain(self):
+        subtasks = [
+            {"task": "A", "depends_on": []},
+            {"task": "B", "depends_on": [0]},
+        ]
+        waves = get_execution_waves(subtasks)
+        self.assertEqual(len(waves), 2)
+        self.assertEqual(waves[0], [0])
+        self.assertEqual(waves[1], [1])
+
+    def test_diamond(self):
+        """A → B, A → C, B+C → D"""
+        subtasks = [
+            {"task": "A", "depends_on": []},
+            {"task": "B", "depends_on": [0]},
+            {"task": "C", "depends_on": [0]},
+            {"task": "D", "depends_on": [1, 2]},
+        ]
+        waves = get_execution_waves(subtasks)
+        self.assertEqual(len(waves), 3)
+        self.assertEqual(waves[0], [0])
+        self.assertIn(1, waves[1])
+        self.assertIn(2, waves[1])
+        self.assertEqual(waves[2], [3])
+
+    def test_mixed_parallel_and_deps(self):
+        subtasks = [
+            {"task": "A", "depends_on": []},
+            {"task": "B", "depends_on": []},
+            {"task": "C", "depends_on": [0]},
+        ]
+        waves = get_execution_waves(subtasks)
+        self.assertEqual(len(waves), 2)
+        self.assertIn(0, waves[0])
+        self.assertIn(1, waves[0])
+        self.assertEqual(waves[1], [2])
 
 
 if __name__ == "__main__":
