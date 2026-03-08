@@ -90,6 +90,40 @@ def parse_tool_calls(text: str, allowed_tools: List[str] = None) -> List[tuple]:
                 except Exception:
                     pass
 
+    # 4. <tool_name>key="value"...</tool_name> or <tool_name key="value"... />
+    #    Handles sloppy LLM output like <web_search>query="test"max_results=5</web_search>
+    if not calls:
+        for tool_name in tool_names:
+            # Body contains key=value pairs
+            body_pattern = fr'<{tool_name}>(.*?)(?:</{tool_name}>|$)'
+            for body in re.findall(body_pattern, text, re.DOTALL):
+                attrs = {}
+                # Quoted: key="value" or key='value'
+                for k, _, v in re.findall(r'(\w+)\s*=\s*(["\'])(.*?)\2', body):
+                    attrs[k] = v
+                # Also capture unquoted: key=value (won't overwrite quoted ones)
+                for k, v in re.findall(r'(\w+)\s*=\s*([^\s"\'<>=]+)', body):
+                    if k not in attrs:
+                        attrs[k] = v
+                if attrs:
+                    # Convert numeric strings
+                    for k, v in attrs.items():
+                        if v.isdigit():
+                            attrs[k] = int(v)
+                    calls.append((tool_name, attrs))
+
+            # Opening tag contains attributes: <tool_name key="value" ...>
+            attr_tag = fr'<{tool_name}\s+([^>]*?)/?>'
+            for attr_str in re.findall(attr_tag, text, re.DOTALL):
+                attrs = {}
+                for k, _, v in re.findall(r'(\w+)\s*=\s*(["\'])(.*?)\2', attr_str):
+                    attrs[k] = v
+                if attrs:
+                    for k, v in attrs.items():
+                        if isinstance(v, str) and v.isdigit():
+                            attrs[k] = int(v)
+                    calls.append((tool_name, attrs))
+
     return calls
 
 

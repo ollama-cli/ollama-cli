@@ -444,10 +444,16 @@ You can call multiple tools in one response by repeating the block above."""
         console.print("")
 
     def _agent_stop(self, agent_id: str):
-        """Stop a running agent."""
+        """Stop a running agent and load its summary into context."""
         status = self.mailbox.get_status(agent_id)
         if status not in ("running", "unknown"):
             print_status(f"Agent {agent_id} is not running (status: {status}).")
+            # If it already finished, offer to load the summary
+            summary = self.mailbox.read_summary(agent_id)
+            if summary:
+                console.print(f"[bold cyan]Summary from {agent_id}:[/bold cyan]")
+                console.print(summary)
+                console.print("")
             return
 
         print_status(f"Stopping [bold]{agent_id}[/bold]...")
@@ -456,6 +462,11 @@ You can call multiple tools in one response by repeating the block above."""
             console.print(f"[bold cyan]Summary from {agent_id}:[/bold cyan]")
             console.print(summary)
             console.print("")
+            # Load into orchestrator context
+            self.messages.append({
+                "role": "user",
+                "content": f"[Subagent {agent_id} was stopped]\n\nPartial result: {summary}"
+            })
         else:
             print_error(f"Agent {agent_id} did not produce a summary within timeout.")
 
