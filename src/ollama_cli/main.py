@@ -29,6 +29,7 @@ from ollama_cli.core.config import load_config, save_config, update_config
 from ollama_cli.core.ollama import OllamaClient
 from ollama_cli.core.sessions import save_session, load_session, list_sessions, generate_session_id, get_session_preview, get_mailbox_dir
 from ollama_cli.agents.mailbox import Mailbox
+from ollama_cli.agents.worker import spawn_agent, poll_agent, stop_agent
 from ollama_cli.ui.formatter import console, print_markdown, print_error, print_status, StreamingDisplay
 from prompt_toolkit.formatted_text import HTML
 from ollama_cli.ui.repl import REPL, CheckpointRestore
@@ -64,6 +65,9 @@ class OllamaCLI:
         self._resume_id = session_id  # set if --session was passed
         self.session_id = session_id or generate_session_id()
         self.mailbox = Mailbox(get_mailbox_dir(self.session_id))
+        self._agent_counter = 0
+        self._agent_procs = {}  # agent_id -> Popen
+        self._pending_agents = {}  # agent_id -> task string
 
     def _build_system_prompt(self) -> str:
         base_prompt = """You are a highly capable AI assistant powered by Ollama. 
@@ -262,6 +266,207 @@ You can call multiple tools in one response by repeating the block above."""
         console.print(f"  [dim]⛶[/dim] Free space:     {_fmt(free)} tokens ({max(0, 100 - pct_used):.0f}%)")
         console.print("")
 
+    def _next_agent_id(self) -> str:
+        self._agent_counter += 1
+        return f"agent-{self._agent_counter:03d}"
+
+    def _handle_agent_command(self, parts):
+        """Handle /agent subcommands."""
+        if len(parts) < 2:
+            self._agent_help()
+            return
+
+        subcmd = parts[1].lower()
+        _subcommands = {'status', 'peek', 'stop', 'help'}
+
+        if subcmd == 'status':
+            self._agent_status()
+        elif subcmd == 'peek':
+            if len(parts) < 3:
+                agents = self.mailbox.list_agents()
+                if not agents:
+                    print_error("No agents to peek.")
+                    return
+                agent_id = sorted(agents)[-1]
+            else:
+                agent_id = parts[2]
+            self._agent_peek(agent_id)
+        elif subcmd == 'stop':
+            if len(parts) < 3:
+                agents = self.mailbox.list_agents()
+                running = [a for a in agents if self.mailbox.get_status(a) == "running"]
+                if not running:
+                    print_error("No running agents to stop.")
+                    return
+                agent_id = running[-1]
+            else:
+                agent_id = parts[2]
+            self._agent_stop(agent_id)
+        elif subcmd == 'help' and len(parts) == 2:
+            self._agent_help()
+        else:
+            # Everything after /agent is the task
+            task = " ".join(parts[1:])
+            self._agent_spawn(task)
+
+    def _agent_help(self):
+        console.print("""
+[bold cyan]Agent Commands:[/bold cyan]
+  /agent <task>       - Spawn a background subagent for a task
+  /agent status       - Show all agents and their status
+  /agent peek [id]    - Show full execution trace of an agent
+  /agent stop [id]    - Stop a running agent and get partial result
+  /agent help         - Show this help
+
+  Agents run in the background. You'll be notified when they finish.
+""")
+
+    def _agent_spawn(self, task: str):
+        """Spawn a subagent for the given task."""
+        agent_id = self._next_agent_id()
+        model = self.current_model
+
+        # Pick relevant tools based on task keywords
+        tools = list(registry.tools.keys())
+
+        print_status(f"Spawning [bold blue]{agent_id}[/bold blue] on [bold green]{model}[/bold green]...")
+        print_status(f"Task: [dim]{task[:80]}[/dim]")
+
+        proc = spawn_agent(
+            task=task,
+            model=model,
+            tools=tools,
+            agent_id=agent_id,
+            mailbox_dir=self.mailbox.base_dir,
+            ollama_url=self.config.get("ollama_url", "http://localhost:11434"),
+        )
+        self._agent_procs[agent_id] = proc
+        self._pending_agents[agent_id] = task
+
+        print_status(f"Agent running in background. Use [bold]/agent status[/bold] to check.")
+
+    def _check_completed_agents(self):
+        """Check for agents that finished since last prompt. Load their summaries."""
+        if not self._pending_agents:
+            return
+        completed = []
+        for agent_id, task in list(self._pending_agents.items()):
+            status = poll_agent(agent_id, self.mailbox)
+            if status in ("success", "done", "error"):
+                completed.append((agent_id, task, status))
+
+        for agent_id, task, status in completed:
+            del self._pending_agents[agent_id]
+            summary = self.mailbox.read_summary(agent_id)
+            if summary:
+                console.print(f"\n[bold cyan]✓ {agent_id} finished:[/bold cyan] {task[:50]}")
+                console.print(f"  {summary[:200]}")
+                if len(summary) > 200:
+                    console.print(f"  [dim]... /agent peek {agent_id} for full trace[/dim]")
+                console.print("")
+                self.messages.append({
+                    "role": "user",
+                    "content": f"[Subagent {agent_id} completed task: {task}]\n\nResult: {summary}"
+                })
+            elif status == "error":
+                print_error(f"Agent {agent_id} failed. Use /agent peek {agent_id} for details.")
+
+    def _agent_status(self):
+        """Show status of all agents in this session."""
+        agents = self.mailbox.list_agents()
+        if not agents:
+            print_status("No agents in this session.")
+            return
+
+        console.print(f"\n[bold cyan]Agents ({len(agents)}):[/bold cyan]")
+        for agent_id in sorted(agents):
+            status = self.mailbox.get_status(agent_id)
+            steps = self.mailbox.read_steps(agent_id)
+
+            # Get task from init step
+            task = ""
+            for s in steps:
+                if s.get("step") == "init":
+                    task = s.get("task", "")[:50]
+                    break
+
+            # Color by status
+            if status in ("success", "done"):
+                status_str = f"[green]{status}[/green]"
+            elif status == "running":
+                status_str = f"[yellow]{status}[/yellow]"
+            elif status == "error":
+                status_str = f"[red]{status}[/red]"
+            else:
+                status_str = f"[dim]{status}[/dim]"
+
+            step_count = len([s for s in steps if s.get("step") in ("think", "act", "observe")])
+            console.print(f"  [dim]{agent_id}[/dim] {status_str} ({step_count} steps) — {task}")
+        console.print("")
+
+    def _agent_peek(self, agent_id: str):
+        """Show full execution trace (NOT loaded into orchestrator context)."""
+        steps = self.mailbox.read_steps(agent_id)
+        if not steps:
+            print_error(f"Agent '{agent_id}' not found.")
+            return
+
+        console.print(f"\n[bold cyan]Trace for {agent_id}:[/bold cyan]")
+        for step in steps:
+            step_type = step.get("step", "?")
+
+            if step_type == "init":
+                console.print(f"  [bold]INIT[/bold] task=[dim]{step.get('task', '')}[/dim] model=[dim]{step.get('model', '')}[/dim]")
+            elif step_type == "think":
+                content = step.get("content", "")[:200]
+                console.print(f"  [cyan]THINK[/cyan] {content}")
+            elif step_type == "act":
+                tool = step.get("tool", "?")
+                params = json.dumps(step.get("params", {}))[:100]
+                console.print(f"  [yellow]ACT[/yellow]   {tool}({params})")
+            elif step_type == "observe":
+                content = step.get("content", "")[:200]
+                console.print(f"  [blue]OBS[/blue]   {content}")
+            elif step_type == "done":
+                summary = step.get("summary", "")[:200]
+                status = step.get("status", "")
+                console.print(f"  [green]DONE[/green]  [{status}] {summary}")
+            elif step_type == "error":
+                content = step.get("content", "")[:200]
+                console.print(f"  [red]ERROR[/red] {content}")
+            elif step_type == "signal":
+                console.print(f"  [bold red]SIGNAL[/bold red] {step.get('signal', '')}")
+            else:
+                console.print(f"  [dim]{step_type}[/dim] {json.dumps(step)[:100]}")
+        console.print("")
+
+    def _agent_stop(self, agent_id: str):
+        """Stop a running agent and load its summary into context."""
+        status = self.mailbox.get_status(agent_id)
+        if status not in ("running", "unknown"):
+            print_status(f"Agent {agent_id} is not running (status: {status}).")
+            # If it already finished, offer to load the summary
+            summary = self.mailbox.read_summary(agent_id)
+            if summary:
+                console.print(f"[bold cyan]Summary from {agent_id}:[/bold cyan]")
+                console.print(summary)
+                console.print("")
+            return
+
+        print_status(f"Stopping [bold]{agent_id}[/bold]...")
+        summary = stop_agent(agent_id, self.mailbox, timeout=15)
+        if summary:
+            console.print(f"[bold cyan]Summary from {agent_id}:[/bold cyan]")
+            console.print(summary)
+            console.print("")
+            # Load into orchestrator context
+            self.messages.append({
+                "role": "user",
+                "content": f"[Subagent {agent_id} was stopped]\n\nPartial result: {summary}"
+            })
+        else:
+            print_error(f"Agent {agent_id} did not produce a summary within timeout.")
+
     def handle_command(self, user_input: str) -> bool:
         """Handle slash commands."""
         if not user_input.startswith('/'):
@@ -314,6 +519,12 @@ You can call multiple tools in one response by repeating the block above."""
   [green]Text-to-Speech:[/green]
     "speak: Hello, this is a test"
     "read this text aloud: [your text]"
+
+[bold]Agents:[/bold]
+  /agent <task>       - Spawn a subagent for a task
+  /agent status       - Show all agents and their status
+  /agent peek [id]    - Show full execution trace
+  /agent stop [id]    - Stop a running agent
 
 [bold]Integrations:[/bold]
   /mcp connect <name> <cmd> [args] - Connect MCP server
@@ -500,6 +711,8 @@ You can call multiple tools in one response by repeating the block above."""
                     print_status(f"Notifications enabled for topic: {topic}")
                 else:
                     print_error("Usage: /notify setup <topic>")
+            elif cmd == '/agent':
+                self._handle_agent_command(parts)
             else:
                 print_error(f"Unknown command: {cmd}")
         except Exception as e:
@@ -557,6 +770,9 @@ You can call multiple tools in one response by repeating the block above."""
             print_status(f"Notification listener active on topic: {self.config['ntfy']['topic']}")
 
         while True:
+            # Check if any background agents finished
+            self._check_completed_agents()
+
             try:
                 user_input = self.repl.get_input()
             except CheckpointRestore:
