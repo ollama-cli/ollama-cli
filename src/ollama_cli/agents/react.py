@@ -107,7 +107,7 @@ def execute_tool(name: str, params: Dict) -> str:
 class ReACTAgent:
     """A ReACT (Reason + Act) agent that runs in-process.
 
-    Usage:
+    Usage (called by the orchestrator):
         agent = ReACTAgent(
             client=ollama_client,
             mailbox=session_mailbox,
@@ -115,19 +115,36 @@ class ReACTAgent:
             task="What is the weather in Cork?",
             model="mistral:latest",
             tools=["web_search"],
+            context="Focus on current temperature and 5-day forecast.",
         )
         summary = agent.run()
     """
 
     def __init__(self, client: OllamaClient, mailbox: Mailbox,
                  agent_id: str, task: str, model: str,
-                 tools: List[str] = None, max_iterations: int = MAX_ITERATIONS):
+                 tools: List[str] = None, context: str = "",
+                 max_iterations: int = MAX_ITERATIONS):
+        """
+        Args:
+            client: OllamaClient instance
+            mailbox: Mailbox instance (per-session)
+            agent_id: Unique ID for this agent
+            task: The task prompt from the orchestrator
+            model: Which Ollama model to use
+            tools: List of tool names this agent is allowed to use.
+                   The orchestrator decides which tools are relevant.
+            context: Extra instructions/context from the orchestrator.
+                     Injected into the system prompt (e.g. "focus on
+                     Irish weather sources", "output as JSON", etc.)
+            max_iterations: Max ReACT loops before forced summary
+        """
         self.client = client
         self.mailbox = mailbox
         self.agent_id = agent_id
         self.task = task
         self.model = model
         self.allowed_tools = tools or list(registry.tools.keys())
+        self.context = context
         self.max_iterations = max_iterations
         self.messages = []
         self.executed_calls = set()
@@ -140,6 +157,8 @@ class ReACTAgent:
                 tool_desc += f"- {name}: {tool.description}\n"
                 tool_desc += f"  Parameters: {json.dumps(tool.parameters)}\n"
 
+        context_block = f"\nAdditional instructions from orchestrator:\n{self.context}\n" if self.context else ""
+
         return f"""You are a focused agent working on a specific task.
 You have access to tools to help you. When you need a tool, use this format:
 
@@ -150,7 +169,7 @@ You have access to tools to help you. When you need a tool, use this format:
 
 Available tools:
 {tool_desc}
-
+{context_block}
 RULES:
 1. Think step by step about how to complete the task.
 2. Use tools when needed, one at a time.
