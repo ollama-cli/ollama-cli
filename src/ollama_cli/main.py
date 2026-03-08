@@ -67,6 +67,7 @@ class OllamaCLI:
         self.mailbox = Mailbox(get_mailbox_dir(self.session_id))
         self._agent_counter = 0
         self._agent_procs = {}  # agent_id -> Popen
+        self._pending_agents = {}  # agent_id -> task string
 
     def _build_system_prompt(self) -> str:
         base_prompt = """You are a highly capable AI assistant powered by Ollama. 
@@ -311,11 +312,13 @@ You can call multiple tools in one response by repeating the block above."""
     def _agent_help(self):
         console.print("""
 [bold cyan]Agent Commands:[/bold cyan]
-  /agent <task>       - Spawn a subagent to work on a task
+  /agent <task>       - Spawn a background subagent for a task
   /agent status       - Show all agents and their status
   /agent peek [id]    - Show full execution trace of an agent
-  /agent stop [id]    - Stop a running agent
+  /agent stop [id]    - Stop a running agent and get partial result
   /agent help         - Show this help
+
+  Agents run in the background. You'll be notified when they finish.
 """)
 
     def _agent_spawn(self, task: str):
@@ -338,41 +341,35 @@ You can call multiple tools in one response by repeating the block above."""
             ollama_url=self.config.get("ollama_url", "http://localhost:11434"),
         )
         self._agent_procs[agent_id] = proc
+        self._pending_agents[agent_id] = task
 
-        # Show spinner while waiting
-        import itertools
-        spinner = itertools.cycle(['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'])
-        import time
-        try:
-            while True:
-                status = poll_agent(agent_id, self.mailbox)
-                if status in ("success", "done", "error"):
-                    break
-                frame = next(spinner)
-                # Use \r to overwrite the line
-                console.print(f"  {frame} [dim]{agent_id}[/dim] working...", end="\r")
-                time.sleep(0.5)
-        except KeyboardInterrupt:
-            print_status(f"\nDetaching from {agent_id} (still running in background).")
-            print_status(f"Use [bold]/agent status[/bold] to check, [bold]/agent peek {agent_id}[/bold] to view.")
+        print_status(f"Agent running in background. Use [bold]/agent status[/bold] to check.")
+
+    def _check_completed_agents(self):
+        """Check for agents that finished since last prompt. Load their summaries."""
+        if not self._pending_agents:
             return
+        completed = []
+        for agent_id, task in list(self._pending_agents.items()):
+            status = poll_agent(agent_id, self.mailbox)
+            if status in ("success", "done", "error"):
+                completed.append((agent_id, task, status))
 
-        console.print(f"  ✓ [bold]{agent_id}[/bold] finished.         ")
-
-        # Read summary
-        summary = self.mailbox.read_summary(agent_id)
-        if summary:
-            console.print(f"\n[bold cyan]Summary from {agent_id}:[/bold cyan]")
-            console.print(summary)
-            console.print("")
-
-            # Add summary to orchestrator context
-            self.messages.append({
-                "role": "user",
-                "content": f"[Subagent {agent_id} completed task: {task}]\n\nResult: {summary}"
-            })
-        else:
-            print_error(f"Agent {agent_id} finished without a summary.")
+        for agent_id, task, status in completed:
+            del self._pending_agents[agent_id]
+            summary = self.mailbox.read_summary(agent_id)
+            if summary:
+                console.print(f"\n[bold cyan]✓ {agent_id} finished:[/bold cyan] {task[:50]}")
+                console.print(f"  {summary[:200]}")
+                if len(summary) > 200:
+                    console.print(f"  [dim]... /agent peek {agent_id} for full trace[/dim]")
+                console.print("")
+                self.messages.append({
+                    "role": "user",
+                    "content": f"[Subagent {agent_id} completed task: {task}]\n\nResult: {summary}"
+                })
+            elif status == "error":
+                print_error(f"Agent {agent_id} failed. Use /agent peek {agent_id} for details.")
 
     def _agent_status(self):
         """Show status of all agents in this session."""
@@ -773,6 +770,9 @@ You can call multiple tools in one response by repeating the block above."""
             print_status(f"Notification listener active on topic: {self.config['ntfy']['topic']}")
 
         while True:
+            # Check if any background agents finished
+            self._check_completed_agents()
+
             try:
                 user_input = self.repl.get_input()
             except CheckpointRestore:
