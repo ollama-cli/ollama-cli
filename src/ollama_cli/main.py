@@ -27,7 +27,8 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from ollama_cli.core.config import load_config, save_config, update_config
 from ollama_cli.core.ollama import OllamaClient
-from ollama_cli.core.sessions import save_session, load_session, list_sessions
+from ollama_cli.core.sessions import save_session, load_session, list_sessions, generate_session_id, get_session_preview, get_mailbox_dir
+from ollama_cli.agents.mailbox import Mailbox
 from ollama_cli.ui.formatter import console, print_markdown, print_error, print_status, StreamingDisplay
 from prompt_toolkit.formatted_text import HTML
 from ollama_cli.ui.repl import REPL, CheckpointRestore
@@ -48,7 +49,7 @@ from ollama_cli.integrations.notify import start_notify_thread, send_notificatio
 VERSION = "3.0.0"
 
 class OllamaCLI:
-    def __init__(self):
+    def __init__(self, session_id: str = None):
         self.config = load_config()
         self.client = OllamaClient(self.config.get("ollama_url"))
         self.repl = REPL()
@@ -58,8 +59,11 @@ class OllamaCLI:
         self.auto_model = True
         self.system_prompt = self._build_system_prompt()
         self.max_tool_iterations = 5
-        self.checkpoints = []  # list of (messages_copy, model) tuples
+        self.checkpoints = []  # list of (messages_copy, model, prompt_text) tuples
         self.max_checkpoints = 5
+        self._resume_id = session_id  # set if --session was passed
+        self.session_id = session_id or generate_session_id()
+        self.mailbox = Mailbox(get_mailbox_dir(self.session_id))
 
     def _build_system_prompt(self) -> str:
         base_prompt = """You are a highly capable AI assistant powered by Ollama. 
@@ -140,6 +144,43 @@ You can call multiple tools in one response by repeating the block above."""
         self.current_model = model
         print_status(f"Restored to before: [dim]{prompt_text[:60]}[/dim]")
         print_status(f"Model: [bold green]{model}[/bold green] ({len(self.checkpoints)} checkpoints remaining)")
+
+    def _save_and_exit(self):
+        """Auto-save session and exit with resume hint."""
+        # Only save if there are user messages beyond system prompt
+        has_content = any(m.get("role") == "user" for m in self.messages)
+        if has_content:
+            sid = save_session(
+                self.messages,
+                session_id=self.session_id,
+                model=self.current_model,
+                auto_model=self.auto_model,
+                checkpoints=[(m, mdl, txt) for m, mdl, txt in self.checkpoints],
+            )
+            print_status(f"Session saved. Resume with:")
+            console.print(f"  [bold green]ollama-cli --session {sid}[/bold green]\n")
+        else:
+            print_status("Goodbye!")
+        sys.exit(0)
+
+    def _resume_session(self, session_id: str):
+        """Restore state from a saved session."""
+        state = load_session(session_id)
+        if not state:
+            print_error(f"Session '{session_id}' not found.")
+            return False
+        self.session_id = session_id
+        self.messages = state.get("messages", [])
+        model = state.get("model", "")
+        if model:
+            self.current_model = model
+        self.auto_model = state.get("auto_model", True)
+        # Restore checkpoints (stored as lists, convert back to tuples)
+        raw_cp = state.get("checkpoints", [])
+        self.checkpoints = [(cp[0], cp[1], cp[2]) for cp in raw_cp if len(cp) >= 3]
+        print_status(f"Resumed session [bold]{session_id}[/bold]")
+        print_status(f"Model: [bold green]{self.current_model}[/bold green] | {len(self.messages)} messages | {len(self.checkpoints)} checkpoints")
+        return True
 
     def _estimate_tokens(self, text: str) -> int:
         """Rough token estimate (~4 chars per token)."""
@@ -236,7 +277,7 @@ You can call multiple tools in one response by repeating the block above."""
 
 [bold]General Commands:[/bold]
   /help           - Show this help message
-  /quit           - Exit the CLI
+  /quit, /exit    - Save session and exit
   /clear          - Clear conversation history
   /context        - Show context window usage
 
@@ -250,9 +291,9 @@ You can call multiple tools in one response by repeating the block above."""
 [bold]Model & Sessions:[/bold]
   /models         - List available models
   /model <name>   - Switch current model
-  /sessions       - List saved sessions
-  /save [name]    - Save current session
-  /load <name>    - Load a saved session
+  /sessions       - List saved sessions with previews
+  /save [id]      - Save current session
+  /load <id>      - Resume a saved session
 
 [bold]Core Agent Tools:[/bold]
   [blue]Filesystem:[/blue] read_file, write_file, list_directory, grep_search, get_tree
@@ -340,9 +381,8 @@ You can call multiple tools in one response by repeating the block above."""
                         print_error("Usage: /config <ollama|comfy|comfy_path|comfy_output|piper_path|piper_model> <value>")
                 else:
                     print_error("Usage: /config <ollama|comfy|comfy_path|comfy_output|piper_path|piper_model> <value>")
-            elif cmd == '/quit':
-                print_status("Goodbye!")
-                sys.exit(0)
+            elif cmd in ('/quit', '/exit'):
+                self._save_and_exit()
             elif cmd == '/context':
                 self._show_context()
             elif cmd == '/clear':
@@ -404,21 +444,32 @@ You can call multiple tools in one response by repeating the block above."""
                                 print_error(f"Invalid selection: {choice}")
             elif cmd == '/sessions':
                 sessions = list_sessions()
-                print_status(f"Recent sessions: {', '.join(sessions[:10])}")
+                if not sessions:
+                    print_status("No saved sessions.")
+                else:
+                    console.print("\n[bold cyan]Saved Sessions:[/bold cyan]")
+                    for s in sessions[:10]:
+                        preview = get_session_preview(s)
+                        console.print(f"  [dim]{s}[/dim] — {preview}")
+                    console.print("")
             elif cmd == '/save':
-                name = parts[1] if len(parts) > 1 else None
-                path = save_session(self.messages, name)
-                print_status(f"Session saved to {path}")
+                sid = save_session(
+                    self.messages,
+                    session_id=parts[1] if len(parts) > 1 else self.session_id,
+                    model=self.current_model,
+                    auto_model=self.auto_model,
+                    checkpoints=[(m, mdl, txt) for m, mdl, txt in self.checkpoints],
+                )
+                print_status(f"Session saved: [bold]{sid}[/bold]")
+                print_status(f"Resume with: [bold green]ollama-cli --session {sid}[/bold green]")
             elif cmd == '/load':
                 if len(parts) > 1:
-                    messages = load_session(parts[1])
-                    if messages:
-                        self.messages = messages
-                        print_status(f"Session '{parts[1]}' loaded.")
+                    if self._resume_session(parts[1]):
+                        pass  # success message printed by _resume_session
                     else:
                         print_error(f"Session '{parts[1]}' not found.")
                 else:
-                    print_error("Usage: /load <session_name>")
+                    print_error("Usage: /load <session_id>")
             elif cmd == '/mcp':
                 if len(parts) > 3 and parts[1] == 'connect':
                     name = parts[2]
@@ -469,7 +520,7 @@ You can call multiple tools in one response by repeating the block above."""
 
     def run(self):
         console.print(f"[bold cyan]Ollama CLI v{VERSION}[/bold cyan]")
-        
+
         # Initial model detection
         try:
             self.available_models = self.client.get_available_models()
@@ -484,15 +535,21 @@ You can call multiple tools in one response by repeating the block above."""
                         self.current_model = am
                         found_pref = True
                         break
-                
+
                 if not found_pref:
                     self.current_model = self.available_models[0]
-                    
+
                 print_status(f"Using model: [bold green]{self.current_model}[/bold green]")
         except Exception as e:
             print_error(f"Could not connect to Ollama: {e}")
 
-        self.reset_messages()
+        # Resume session if --session was provided, otherwise start fresh
+        resumed = False
+        if self._resume_id:
+            resumed = self._resume_session(self._resume_id)
+
+        if not resumed:
+            self.reset_messages()
         
         # Start notification listener if enabled
         if self.config.get("ntfy", {}).get("enabled"):
@@ -741,18 +798,31 @@ You can call multiple tools in one response by repeating the block above."""
         return f"Unknown tool: {name}"
 
 def main():
+    import argparse
+    parser = argparse.ArgumentParser(description="Ollama CLI")
+    parser.add_argument("--session", type=str, default=None,
+                        help="Resume a saved session by ID")
+    args = parser.parse_args()
+
     # Ensure Ctrl+Z (SIGTSTP) uses the default handler so the process can be
     # suspended and resumed with fg.  Some libraries (e.g. prompt_toolkit) may
     # override this; restoring SIG_DFL lets the OS handle it natively.
     if hasattr(signal, "SIGTSTP"):
         signal.signal(signal.SIGTSTP, signal.SIG_DFL)
 
+    cli = None
     try:
-        cli = OllamaCLI()
+        cli = OllamaCLI(session_id=args.session)
         cli.run()
     except KeyboardInterrupt:
-        print_status("Interrupted by user. Exiting.")
-        sys.exit(0)
+        if cli:
+            try:
+                cli._save_and_exit()
+            except SystemExit:
+                pass
+        else:
+            print_status("Interrupted by user. Exiting.")
+            sys.exit(0)
     except Exception as e:
         print_error(f"Fatal error: {e}")
         logger.exception("Fatal error")
