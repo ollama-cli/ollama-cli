@@ -441,7 +441,13 @@ You can call multiple tools in one response by repeating the block above."""
             combined = "\n\n".join(summaries)
             self.messages.append({
                 "role": "user",
-                "content": f"I asked subagents to help. Here are their results:\n\n{combined}\n\nPlease synthesize these results into a final answer for the user's original question: {user_input}"
+                "content": (
+                    f"Subagents completed their research. Here are the results:\n\n"
+                    f"{combined}\n\n"
+                    f"[SYSTEM]: Using ONLY the subagent results above, provide a clear, "
+                    f"complete answer to the user's original question: \"{user_input}\"\n"
+                    f"DO NOT call any tools. DO NOT use placeholders. Just synthesize the data."
+                )
             })
             console.print("")
             # Now run the normal chat cycle to synthesize

@@ -204,18 +204,22 @@ class ReACTAgent:
         for name in self.allowed_tools:
             tool = registry.get_tool(name)
             if tool:
-                tool_desc += f"- {name}: {tool.description}\n"
-                tool_desc += f"  Parameters: {json.dumps(tool.parameters)}\n"
+                # Show simple param names, not full schema (small models copy schemas)
+                param_names = list(tool.parameters.keys())
+                tool_desc += f"- {name}({', '.join(param_names)}): {tool.description}\n"
 
         context_block = f"\nAdditional instructions from orchestrator:\n{self.context}\n" if self.context else ""
 
         return f"""You are a focused agent working on a specific task.
-You have access to tools to help you. When you need a tool, use this format:
+When you need a tool, use EXACTLY this format:
 
 <tool_call>
-<tool_name>name</tool_name>
-<parameters>{{"param": "value"}}</parameters>
+<tool_name>web_search</tool_name>
+<parameters>{{"query": "your search terms"}}</parameters>
 </tool_call>
+
+IMPORTANT: Parameters must be a JSON object with simple string/number values.
+For example: {{"query": "weather in Cork", "max_results": 3}}
 
 Available tools:
 {tool_desc}
